@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -16,7 +14,6 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/hay-kot/weft/internal/commands"
-	"github.com/hay-kot/weft/internal/paths"
 )
 
 var (
@@ -49,34 +46,14 @@ func build() string {
 	return fmt.Sprintf("%s (%s) %s", version, short, date)
 }
 
-func setupLogger(level, logFile string, noColor bool) error {
+// setupLogger sends weft's own log to stderr until a run replaces it with
+// the run's weft.log.
+func setupLogger(level string, noColor bool) error {
 	parsedLevel, err := zerolog.ParseLevel(level)
 	if err != nil {
-		return fmt.Errorf("failed to parse log level: %w", err)
+		return fmt.Errorf("--log-level: %w", err)
 	}
-
-	var output io.Writer = zerolog.ConsoleWriter{Out: os.Stderr, NoColor: noColor}
-
-	if logFile != "" {
-		logDir := filepath.Dir(logFile)
-		if err := os.MkdirAll(logDir, 0o750); err != nil {
-			return fmt.Errorf("failed to create log directory: %w", err)
-		}
-
-		// The log path comes from the application default, config, or an explicit user flag.
-		file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec
-		if err != nil {
-			return fmt.Errorf("failed to open log file: %w", err)
-		}
-
-		output = io.MultiWriter(
-			zerolog.ConsoleWriter{Out: os.Stderr, NoColor: noColor},
-			file,
-		)
-	}
-
-	log.Logger = log.Output(output).Level(parsedLevel)
-
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: noColor}).Level(parsedLevel)
 	return nil
 }
 
@@ -92,15 +69,37 @@ func run() int {
 	flags := &commands.Flags{}
 
 	app := &cli.Command{
-		Name:                  "weft",
-		Usage:                 `Run task-runner tasks as a DAG with a live graph in your terminal`,
+		Name:  "weft",
+		Usage: `Run task-runner tasks as a DAG with a live graph in your terminal`,
+		Description: `A workflow is a YAML file in .weft/<name>.yml at the root of a project.
+Each node runs a shell command once the nodes it needs have succeeded:
+
+  # .weft/deploy.yml
+  concurrency: 4
+  nodes:
+    check:
+      run: mise run check
+    release:
+      needs: [check]
+      run: mise run release
+    apply:
+      needs: [release]
+      interactive: true    # gets the real terminal, for prompts
+      run: tofu apply
+
+Node fields: run (required), needs, label, dir, env, shell, interactive,
+timeout, kill_timeout, continue_on_error. Top-level fields: concurrency,
+shell, nodes. weft validate checks a file; weft run runs it.
+
+Run "weft <command> --help" for each command, and see the README for every
+field.`,
 		Version:               build(),
 		EnableShellCompletion: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "log-level",
 				Usage:       "log level (debug, info, warn, error, fatal, panic)",
-				Sources:     cli.EnvVars("WEFT_LOG_LEVEL", "LOG_LEVEL"),
+				Sources:     cli.EnvVars("WEFT_LOG_LEVEL"),
 				Value:       "info",
 				Destination: &flags.LogLevel,
 			},
@@ -110,33 +109,9 @@ func run() int {
 				Sources:     cli.EnvVars("NO_COLOR"),
 				Destination: &flags.NoColor,
 			},
-			&cli.StringFlag{
-				Name:        "log-file",
-				Usage:       "path to log file (optional)",
-				Sources:     cli.EnvVars("LOG_FILE"),
-				Destination: &flags.LogFile,
-			},
-			&cli.BoolFlag{
-				Name:        "json",
-				Usage:       "output in JSON format",
-				Destination: &flags.JSON,
-			},
 		},
 		Before: func(ctx context.Context, c *cli.Command) (context.Context, error) {
-			logFile := flags.LogFile
-			if logFile == "" {
-				dataDir, err := paths.DataDir()
-				if err != nil {
-					return ctx, fmt.Errorf("resolve data directory: %w", err)
-				}
-				logFile = filepath.Join(dataDir, "weft.log")
-			}
-
-			if err := setupLogger(flags.LogLevel, logFile, flags.NoColor); err != nil {
-				return ctx, err
-			}
-
-			return ctx, nil
+			return ctx, setupLogger(flags.LogLevel, flags.NoColor)
 		},
 	}
 	app = commands.NewRunCmd(flags).Register(app)

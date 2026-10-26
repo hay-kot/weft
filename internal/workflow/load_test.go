@@ -119,7 +119,7 @@ nodes:
     run: echo a
     needs: [ghost]
 `,
-			want: []string{`node "a" needs unknown node "ghost"`},
+			want: []string{`node "a": line 5: needs unknown node "ghost"`},
 		},
 		{
 			name: "self need",
@@ -129,7 +129,7 @@ nodes:
     run: echo a
     needs: [a]
 `,
-			want: []string{`node "a" needs itself`},
+			want: []string{`node "a": line 5: needs itself`},
 		},
 		{
 			name: "duplicate need",
@@ -141,7 +141,7 @@ nodes:
     run: echo b
     needs: [a, a]
 `,
-			want: []string{`node "b" lists "a" twice in needs`},
+			want: []string{`node "b": line 7: lists "a" twice in needs`},
 		},
 		{
 			name: "cycle",
@@ -172,7 +172,7 @@ nodes:
   a:
     label: no command
 `,
-			want: []string{`node "a": run is required`},
+			want: []string{`node "a": line 3: run is required`},
 		},
 		{
 			name: "unknown node field",
@@ -192,12 +192,12 @@ nodes:
   a:
     run: echo a
 `,
-			want: []string{"field other not found"},
+			want: []string{`line 2: unknown field "other"; a workflow has concurrency, shell, and nodes`},
 		},
 		{
 			name: "empty file",
 			src:  "",
-			want: nil,
+			want: []string{"the file is empty; a workflow needs a nodes: mapping with at least one node"},
 		},
 		{
 			name: "no nodes",
@@ -212,7 +212,7 @@ nodes:
     run: echo a
     timeout: soon
 `,
-			want: []string{`node "a": timeout must be a positive duration`},
+			want: []string{`node "a": line 5: timeout must be a positive duration like 90s or 5m, got "soon"`},
 		},
 		{
 			name: "absolute dir",
@@ -222,7 +222,44 @@ nodes:
     run: echo a
     dir: /etc
 `,
-			want: []string{`node "a": dir must be relative`},
+			want: []string{`node "a": line 5: dir must be relative`},
+		},
+		{
+			name: "comment-only file",
+			src:  "# nothing yet\n",
+			want: []string{"the file is empty"},
+		},
+		{
+			name: "top level is a list",
+			src:  "- a\n",
+			want: []string{"line 1: a workflow must be a mapping with a nodes: key"},
+		},
+		{
+			name: "nodes left empty",
+			src:  "nodes:\n",
+			want: []string{"no nodes defined"},
+		},
+		{
+			name: "concurrency not a number",
+			src:  "concurrency: lots\nnodes:\n  a:\n    run: echo a\n",
+			want: []string{`line 1: concurrency must be a whole number, got "lots"`},
+		},
+		{
+			name: "field shapes",
+			src: `
+nodes:
+  a:
+    run: [echo, a]
+    needs: b
+    interactive: yes
+    env: [A=1]
+`,
+			want: []string{
+				`node "a": line 4: run must be a string`,
+				`node "a": line 5: needs must be a list of node IDs, such as [build, test]`,
+				`node "a": line 6: interactive must be true or false, got "yes"`,
+				`node "a": line 7: env must be a mapping of names to values`,
+			},
 		},
 		{
 			name: "negative concurrency",
@@ -232,7 +269,7 @@ nodes:
   a:
     run: echo a
 `,
-			want: []string{"concurrency must be positive, got -1"},
+			want: []string{"line 2: concurrency must be positive, got -1"},
 		},
 	}
 
@@ -250,6 +287,8 @@ nodes:
 			for _, want := range tc.want {
 				assert.Contains(t, joined, want)
 			}
+			assert.NotContains(t, joined, "!!", "YAML tags are decoder internals")
+			assert.NotContains(t, joined, "workflow.raw", "Go types are decoder internals")
 		})
 	}
 }
@@ -410,7 +449,20 @@ func TestResolve(t *testing.T) {
 
 		_, _, err := workflow.Resolve(root, "missing")
 		require.Error(t, err)
-		assert.ErrorContains(t, err, `"missing" not found`)
+		require.ErrorContains(t, err, `"missing" not found`)
+		assert.ErrorContains(t, err, "which holds no workflow files")
+	})
+
+	t.Run("unknown name lists the workflows there", func(t *testing.T) {
+		t.Parallel()
+
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, ".weft", "deploy.yml"), "nodes: {}\n")
+		writeFile(t, filepath.Join(root, ".weft", "build.yaml"), "nodes: {}\n")
+
+		_, _, err := workflow.Resolve(root, "deplyo")
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `"deplyo" not found in `+filepath.Join(root, ".weft")+"; it has build, deploy")
 	})
 
 	t.Run("path argument uses its directory as root", func(t *testing.T) {

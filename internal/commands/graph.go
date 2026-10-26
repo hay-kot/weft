@@ -27,11 +27,12 @@ type GraphCmd struct {
 	flags  *Flags
 	layout string
 	width  int
+	json   bool
 }
 
 // NewGraphCmd creates a new graph command.
 func NewGraphCmd(flags *Flags) *GraphCmd {
-	return &GraphCmd{flags: flags, layout: layoutAuto, width: -1}
+	return &GraphCmd{flags: flags, layout: layoutAuto, width: -1, json: false}
 }
 
 // Register adds the graph command to the application.
@@ -66,6 +67,11 @@ lines.`,
 				Usage:       "width available for the auto layout (default: the terminal width; unlimited when not a terminal)",
 				Value:       -1,
 				Destination: &cmd.width,
+			},
+			&cli.BoolFlag{
+				Name:        "json",
+				Usage:       "print nodes, levels, and the drawn lines as JSON",
+				Destination: &cmd.json,
 			},
 		},
 		Action: cmd.run,
@@ -117,7 +123,7 @@ func (cmd *GraphCmd) run(_ context.Context, c *cli.Command) error {
 		MaxCellWidth: 0,
 	})
 
-	if cmd.flags.JSON {
+	if cmd.json {
 		return json.NewEncoder(os.Stdout).Encode(graphJSON(wf, grid))
 	}
 	if len(wf.Nodes) == 0 {

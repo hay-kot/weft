@@ -4,8 +4,4 @@ package commands
 type Flags struct {
 	LogLevel string
 	NoColor  bool
-
-	LogFile string
-
-	JSON bool
 }

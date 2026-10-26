@@ -230,8 +230,8 @@ check and ask the same way.
 Only one weft at a time can use a run directory. A second `--resume` while
 the first is still going fails with the other weft's PID.
 
-Global flags: `--log-level` (or `WEFT_LOG_LEVEL`), `--no-color` (or
-`NO_COLOR`), `--json` (for `validate`).
+Global flags: `--log-level` (or `WEFT_LOG_LEVEL`) and `--no-color` (or
+`NO_COLOR`). `weft validate --json` and `weft graph --json` print JSON.
 
 ## Run directories and logs
 

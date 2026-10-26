@@ -16,11 +16,12 @@ import (
 // ValidateCmd implements the validate command.
 type ValidateCmd struct {
 	flags *Flags
+	json  bool
 }
 
 // NewValidateCmd creates a new validate command.
 func NewValidateCmd(flags *Flags) *ValidateCmd {
-	return &ValidateCmd{flags: flags}
+	return &ValidateCmd{flags: flags, json: false}
 }
 
 // Register adds the validate command to the application.
@@ -32,6 +33,13 @@ func (cmd *ValidateCmd) Register(app *cli.Command) *cli.Command {
 		Description: `Parses a workflow and checks node IDs, fields, needs, and cycles. With no
 argument, checks every workflow in the nearest .weft/ directory. Exits
 non-zero when any workflow is invalid.`,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:        "json",
+				Usage:       "print one result per workflow as JSON",
+				Destination: &cmd.json,
+			},
+		},
 		Action: cmd.run,
 	})
 
@@ -106,7 +114,7 @@ func (cmd *ValidateCmd) run(_ context.Context, c *cli.Command) error {
 		results = append(results, res)
 	}
 
-	if cmd.flags.JSON {
+	if cmd.json {
 		if err := json.NewEncoder(os.Stdout).Encode(results); err != nil {
 			return err
 		}
