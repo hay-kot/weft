@@ -1,5 +1,5 @@
- deploy  running  0:01  5/7 done                                                               run 20261025T191200-a3f9
- run dir /repo/.weft/runs/deploy/20261025T191200-a3f9
+ deploy  running  0:01  5/7 done                                                           run 20261025T191200.000-a3f9
+ run dir /repo/.weft/runs/deploy/20261025T191200.000-a3f9
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
                ┌─▸ ✓ go-check  0:02 ─┐
  ✓ guard 0:00 ─┼─▸ ✓ ui-check  0:02 ─┼─▸ ✓ release 0:01 ───▸ ⠋ deploy 0:01 ───▸ ○ tofu-apply
@@ -26,5 +26,5 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- --resume continues run 20261025T191200-a3f9: running deploy, tofu-apply; skipping 5 that succeeded
+ --resume continues run 20261025T191200.000-a3f9: running deploy, tofu-apply; skipping 5 that succeeded
  hjkl select • enter log • ctrl+c cancel • q quit • ? help • r rerun • R rerun+downstream • x cancel node • f follow …

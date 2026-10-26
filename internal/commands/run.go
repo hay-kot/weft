@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -228,7 +229,6 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 
 	r := &runSession{
 		cmd: cmd, wf: wf, run: run, prep: prep, bus: bus, log: runLog, stderr: stderr,
-		intr:   &interrupter{eng: nil},
 		notice: startNotice(wf, prep.plan, run.ID, cmd.sel),
 		mu:     sync.Mutex{}, baseline: prep.state.Last(),
 	}
@@ -297,7 +297,6 @@ type runSession struct {
 	bus    *events.Bus
 	log    zerolog.Logger
 	stderr *asyncWriter
-	intr   *interrupter
 	// notice describes a resumed or narrowed run, or is empty.
 	notice string
 	eng    *engine.Engine
@@ -317,13 +316,12 @@ func (r *runSession) engine(lender engine.TerminalLender, tty, reruns bool) *eng
 		Lender:      lender,
 		Bus:         r.bus,
 		Concurrency: r.cmd.concurrency,
-		Env:         nodeEnv(tty),
+		Env:         nodeEnv(os.Environ(), tty, r.cmd.flags.NoColor),
 		Plan:        &p,
 		State:       r.prep.state,
 		Reruns:      reruns,
 		Log:         r.log,
 	})
-	r.intr.eng = eng
 	r.eng = eng
 	return eng
 }
@@ -358,7 +356,7 @@ func (r *runSession) plain(ctx context.Context, eventLog *sync.WaitGroup) (engin
 	rendering.Go(func() { renderer.Run(renderSub.C) })
 
 	eng := r.engine(plain.Lender{Sub: renderSub}, stdoutTTY, false)
-	sigs := handleSignals(r.intr.Interrupt, r.log, func(level int, _ os.Signal) {
+	sigs := handleSignals(r.interrupt, r.log, func(level int, _ os.Signal) {
 		if level == 1 {
 			_, _ = fmt.Fprintln(r.stderr, "weft: canceling; running nodes get SIGINT and a grace period. Press Ctrl-C again to kill them now.")
 			return
@@ -392,16 +390,15 @@ func (r *runSession) tui(ctx context.Context, confirm string) (summary engine.Su
 	var startOnce sync.Once
 	p := r.prep.plan
 	app := tui.NewApp(tui.Options{
-		Workflow:  r.wf,
-		Run:       r.run,
-		ExitOnEnd: r.cmd.exitOnEnd,
-		Interrupt: r.intr.Interrupt,
-		Plan:      &p,
-		Confirm:   confirm,
-		Start:     func() { startOnce.Do(func() { close(start) }) },
-		Rerun:     r.rerun,
-		// The engine is created after the TUI, which lends it the terminal.
-		CancelNode: func(id string) (plan.CancelAction, error) { return r.eng.CancelNode(id) },
+		Workflow:   r.wf,
+		Run:        r.run,
+		ExitOnEnd:  r.cmd.exitOnEnd,
+		Interrupt:  r.interrupt,
+		Plan:       &p,
+		Confirm:    confirm,
+		Start:      func() { startOnce.Do(func() { close(start) }) },
+		Rerun:      r.rerun,
+		CancelNode: r.cancelNode,
 		Notice:     r.notice,
 		Log:        r.log,
 	}, r.bus.Subscribe(0), r.cmd.flags.NoColor)
@@ -411,7 +408,7 @@ func (r *runSession) tui(ctx context.Context, confirm string) (summary engine.Su
 	}
 
 	var tuiGone atomic.Bool
-	sigs := handleSignals(r.intr.Interrupt, r.log, func(level int, sig os.Signal) {
+	sigs := handleSignals(r.interrupt, r.log, func(level int, sig os.Signal) {
 		if !tuiGone.Load() {
 			app.Interrupted(level, sig.String())
 			return
@@ -464,7 +461,7 @@ func (r *runSession) tui(ctx context.Context, confirm string) (summary engine.Su
 	if uiErr != nil {
 		_, _ = fmt.Fprintf(r.stderr, "weft: TUI error: %v\n", uiErr)
 	}
-	r.intr.cancel()
+	eng.Cancel()
 	return <-result, sigs.abort, true, uiErr
 }
 
@@ -503,18 +500,13 @@ func (r *runSession) rerun(id string, downstream, force bool) error {
 	return nil
 }
 
-// interrupter forwards cancel requests from keys and signals to the
-// engine, which escalates them per pass.
-type interrupter struct {
-	eng *engine.Engine
-}
+// interrupt forwards a cancel request from a key or signal to the engine,
+// which escalates it per pass. It returns the level: 1 cancels, 2 and up
+// kill, and 0 means no pass is active. The TUI is created before the
+// engine, which it lends the terminal, so this reads r.eng late.
+func (r *runSession) interrupt() int { return r.eng.Interrupt() }
 
-// cancel cancels the current pass without escalating to a kill.
-func (i *interrupter) cancel() { i.eng.Cancel() }
-
-// Interrupt escalates and returns the level: 1 cancels, 2 and up kill, and
-// 0 means no pass is active.
-func (i *interrupter) Interrupt() int { return i.eng.Interrupt() }
+func (r *runSession) cancelNode(id string) (plan.CancelAction, error) { return r.eng.CancelNode(id) }
 
 // outputStallTimeout is how long weft waits at exit for a renderer that has
 // stopped making progress.
@@ -581,10 +573,17 @@ func (lw levelWriter) WriteLevel(l zerolog.Level, p []byte) (int, error) {
 
 // nodeEnv returns the base environment for nodes. When weft renders to a
 // terminal, tools that check isatty on their own pipe would drop color, so
-// weft asks for it explicitly unless the user opted out with NO_COLOR.
-func nodeEnv(tty bool) []string {
-	env := os.Environ()
-	if tty && os.Getenv("NO_COLOR") == "" {
+// weft asks for it explicitly. --no-color (or NO_COLOR) turns color off for
+// nodes too, the same way NO_COLOR in the environment does.
+func nodeEnv(base []string, tty, noColor bool) []string {
+	env := slices.Clone(base)
+	if noColor {
+		if !slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "NO_COLOR=") }) {
+			env = append(env, "NO_COLOR=1")
+		}
+		return env
+	}
+	if tty {
 		env = append(env, "CLICOLOR_FORCE=1", "FORCE_COLOR=1")
 	}
 	return env

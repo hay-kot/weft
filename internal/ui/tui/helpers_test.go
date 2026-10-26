@@ -18,8 +18,8 @@ func splitLines(s string) []string {
 
 func testRun() *store.Run {
 	return &store.Run{
-		ID:       "20261025T191200-a3f9",
-		Dir:      "/repo/.weft/runs/deploy/20261025T191200-a3f9",
+		ID:       "20261025T191200.000-a3f9",
+		Dir:      "/repo/.weft/runs/deploy/20261025T191200.000-a3f9",
 		Workflow: workflowName,
 	}
 }

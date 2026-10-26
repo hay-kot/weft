@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hay-kot/weft/internal/events"
 	"github.com/hay-kot/weft/internal/workflow"
 )
 
@@ -41,7 +42,7 @@ const KeepRuns = 20
 const (
 	dirMode  = 0o700
 	fileMode = 0o600
-	idLayout = "20060102T150405"
+	idLayout = "20060102T150405.000"
 )
 
 // Run is one run directory.
@@ -52,8 +53,10 @@ type Run struct {
 	Workflow string
 }
 
-// NewID returns a run ID that sorts by start time: a UTC timestamp plus a
-// random suffix that keeps runs started in the same second apart.
+// NewID returns a run ID that sorts by start time: a UTC timestamp to the
+// millisecond plus a random suffix that keeps IDs from the same millisecond
+// apart. Two IDs from the same millisecond sort by suffix, not by start;
+// Create avoids that.
 func NewID(now time.Time) (string, error) {
 	var b [2]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -73,15 +76,35 @@ func Create(root, workflowName string, now time.Time) (*Run, error) {
 	if err := ensureGitignore(root); err != nil {
 		return nil, err
 	}
-	id, err := NewID(now)
+	runsDir := WorkflowRunsDir(root, workflowName)
+	ids, err := runIDs(runsDir)
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	id, err := NewID(after(ids, now))
 	if err != nil {
 		return nil, fmt.Errorf("generate run ID: %w", err)
 	}
-	dir := filepath.Join(WorkflowRunsDir(root, workflowName), id)
+	dir := filepath.Join(runsDir, id)
 	if err := os.MkdirAll(filepath.Join(dir, NodesDir), dirMode); err != nil {
 		return nil, fmt.Errorf("create run directory: %w", err)
 	}
 	return &Run{ID: id, Dir: dir, Workflow: workflowName}, nil
+}
+
+// after returns now, or a millisecond past the newest run in ids when now
+// is not later than it. Latest and Prune go by ID order, so a run started
+// in the same millisecond as the last one, or after the clock stepped
+// back, must still sort last.
+func after(ids []string, now time.Time) time.Time {
+	if len(ids) == 0 {
+		return now
+	}
+	newest, err := idTime(ids[len(ids)-1])
+	if err != nil || now.Truncate(time.Millisecond).After(newest) {
+		return now
+	}
+	return newest.Add(time.Millisecond)
 }
 
 func ensureGitignore(root string) error {
@@ -104,9 +127,11 @@ func ensureGitignore(root string) error {
 	return f.Close()
 }
 
-// Prune deletes the oldest run directories of a workflow so that at most
-// keep remain. Directory names that are not run IDs are left alone, and so
-// is a run another weft process holds locked; it counts toward keep.
+// Prune deletes every run directory of a workflow except the newest keep.
+// Directory names that are not run IDs are left alone, and so is an older
+// run another weft process holds locked, so more than keep can remain
+// until that process lets go. Newer runs never go in place of a locked one:
+// the newest run is the one --resume continues.
 func Prune(root, workflowName string, keep int) error {
 	dir := WorkflowRunsDir(root, workflowName)
 	ids, err := runIDs(dir)
@@ -132,8 +157,12 @@ func isRunID(name string) bool {
 	if len(name) != len(idLayout)+5 || name[len(idLayout)] != '-' {
 		return false
 	}
-	_, err := time.Parse(idLayout, name[:len(idLayout)])
+	_, err := idTime(name)
 	return err == nil
+}
+
+func idTime(id string) (time.Time, error) {
+	return time.Parse(idLayout, id[:min(len(id), len(idLayout))])
 }
 
 // LogPath returns the path of weft's own log for this run.
@@ -175,14 +204,13 @@ type AttemptRecord struct {
 	Dir         string   `json:"dir"`
 	Interactive bool     `json:"interactive"`
 	State       string   `json:"state"`
-	// Reason is why the attempt ended: exit, timeout, canceled, blocked, or
-	// start_error.
-	Reason   string    `json:"reason"`
-	ExitCode int       `json:"exit_code"`
-	Signal   string    `json:"signal,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Started  time.Time `json:"started,omitzero"`
-	Finished time.Time `json:"finished"`
+	// Reason is why the attempt ended.
+	Reason   events.Reason `json:"reason"`
+	ExitCode int           `json:"exit_code"`
+	Signal   string        `json:"signal,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Started  time.Time     `json:"started,omitzero"`
+	Finished time.Time     `json:"finished"`
 	// Log is the output log path relative to the run directory. Empty when
 	// the attempt never started.
 	Log string `json:"log,omitempty"`

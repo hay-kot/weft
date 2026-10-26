@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,7 +85,7 @@ func TestCancelNodeStopsOneBranch(t *testing.T) {
 	var rec store.AttemptRecord
 	readJSON(t, h.run.AttemptRecordPath("a", 1), &rec)
 	assert.Equal(t, string(events.Canceled), rec.State)
-	assert.Equal(t, string(runner.ReasonCanceled), rec.Reason)
+	assert.Equal(t, events.ReasonCanceled, rec.Reason)
 	assert.True(t, logHas(h.logBuf.String(), `"message":"node cancel requested"`, `"node":"a"`, `"attempt":1`, `"action":"cancel_running"`),
 		"weft.log: %s", h.logBuf.String())
 }
@@ -145,7 +146,7 @@ nodes:
 	assert.Equal(t, []string{"a"}, h.fake.started)
 	var rec store.AttemptRecord
 	readJSON(t, h.run.AttemptRecordPath("b", lastChange(h.snapshot(), "b").Attempt), &rec)
-	assert.Equal(t, string(runner.ReasonCanceled), rec.Reason)
+	assert.Equal(t, events.ReasonCanceled, rec.Reason)
 }
 
 func TestCancelNodeWaitingForTheTerminal(t *testing.T) {
@@ -236,4 +237,37 @@ func TestNodeKillThenPassKill(t *testing.T) {
 
 	s := <-done
 	assert.Equal(t, events.Canceled, s.States["a"])
+}
+
+// After Ctrl-C has sent SIGINT to a node that traps it, x on that node is
+// the second request to stop it, so it kills instead of canceling again.
+func TestCancelNodeAfterPassCancelKills(t *testing.T) {
+	interrupted := make(chan struct{})
+	var killed atomic.Bool
+	h := newHarnessWith(t, "nodes:\n  a: {run: a}\n", nil, func(o *engine.Options) {
+		o.Runner = runnerFunc(func(ctx context.Context, s runner.Spec) runner.Result {
+			<-ctx.Done()
+			close(interrupted)
+			<-s.Kill
+			killed.Store(true)
+			return result(runner.ReasonCanceled, -1, "killed")
+		})
+	})
+	done := h.runAsync(t)
+	h.waitEvent(t, isState("a", events.Running))
+
+	h.eng.Cancel()
+	<-interrupted
+	action, err := h.eng.CancelNode("a")
+	require.NoError(t, err)
+	assert.Equal(t, plan.KillRunning, action)
+
+	select {
+	case s := <-done:
+		assert.Equal(t, events.Canceled, s.States["a"])
+		assert.True(t, killed.Load(), "the node got the kill")
+	case <-time.After(5 * time.Second):
+		h.eng.Kill()
+		assert.FailNow(t, "the node was not killed")
+	}
 }

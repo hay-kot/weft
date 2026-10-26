@@ -599,8 +599,8 @@ fail_deploy_plain() {
   latest_run
 }
 
-# The M4 "done when" in plain mode: resume reruns deploy and skips
-# release, and deploy rolls out the tag release recorded the first time.
+# Plain mode: --resume reruns the failed deploy and skips release, which
+# succeeded, so deploy rolls out the tag release recorded the first time.
 scenario_plain_resume() {
   local run tag
   run=$(fail_deploy_plain)
@@ -644,8 +644,8 @@ scenario_plain_only() {
   expect combo "can't be combined"
 }
 
-# The M4 "done when" in the TUI: resume shows the skipped nodes, reruns
-# deploy, and hands tofu-apply the terminal.
+# TUI: --resume shows the skipped nodes, reruns the failed deploy, and hands
+# tofu-apply the terminal.
 scenario_tui_resume() {
   local run tag
   run=$(fail_deploy_plain)
@@ -713,6 +713,10 @@ tm set-option -g remain-on-exit on
 for scenario in "${@:-${all[@]}}"; do
   log "$scenario"
   before=$failures
+  if ! declare -F "scenario_$scenario" >/dev/null; then
+    fail "unknown scenario"
+    continue
+  fi
   "scenario_$scenario" || true
   [ "$failures" -eq "$before" ] && printf '\033[32mok\033[0m   %s\n' "$scenario"
 done

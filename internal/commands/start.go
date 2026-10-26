@@ -226,7 +226,7 @@ func (p *prepared) recordLost(wf *workflow.Workflow) error {
 		n := wf.Node(id)
 		rec := store.AttemptRecord{
 			Node: id, Attempt: ns.Attempt, Command: n.Run, Shell: n.Shell, Dir: filepath.Join(wf.Root, n.Dir), Interactive: n.Interactive,
-			State: string(events.Failed), Reason: reasonAbandoned, ExitCode: -1, Signal: "",
+			State: string(events.Failed), Reason: events.ReasonAbandoned, ExitCode: -1, Signal: "",
 			Error:   "weft exited while this attempt was running; it never saw the attempt end",
 			Started: ns.Started, Finished: p.prior.Updated, Log: ns.Log,
 		}
@@ -236,10 +236,6 @@ func (p *prepared) recordLost(wf *workflow.Workflow) error {
 	}
 	return nil
 }
-
-// reasonAbandoned is the attempt-record reason for an attempt whose weft
-// exited before it ended.
-const reasonAbandoned = "abandoned"
 
 // aliveAttempts returns the lost attempts whose process group still has
 // processes. A pgid can be reused after its group is gone, so this can

@@ -106,6 +106,18 @@ func TestStdoutAndStderrShareOnePipeInOrder(t *testing.T) {
 	assert.Equal(t, "one\ntwo\nthree\n", out.String())
 }
 
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, syscall.ENOSPC }
+
+func TestFailingOutputWriterDoesNotStallTheNode(t *testing.T) {
+	s := spec(t, "head -c 1048576 /dev/zero; echo done", nil)
+	s.Output = failingWriter{}
+	s.Timeout = 10 * time.Second
+	res := runner.Process{}.Run(t.Context(), s)
+	assert.True(t, res.Success(), "result %+v", res)
+}
+
 func TestDirAndEnv(t *testing.T) {
 	out := newBuf()
 	s := spec(t, `pwd; echo "$WEFT_TEST_VAR"`, out)

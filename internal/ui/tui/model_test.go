@@ -101,7 +101,7 @@ func running(node string, sec float64) events.NodeChanged {
 }
 
 func ended(node string, state events.State, errText string, from, to float64) events.NodeChanged {
-	reason, code := "exit", 0
+	reason, code := events.ReasonExit, 0
 	if state == events.Failed {
 		code = 1
 	}
@@ -113,7 +113,7 @@ func ended(node string, state events.State, errText string, from, to float64) ev
 
 func notRun(node string, state events.State, errText string, sec float64) events.NodeChanged {
 	return events.NodeChanged{
-		Node: node, State: state, Attempt: 1, ExitCode: -1, Err: errText, Reason: string(state),
+		Node: node, State: state, Attempt: 1, ExitCode: -1, Err: errText, Reason: events.Reason(state),
 		Started: time.Time{}, Finished: at(sec), At: at(sec),
 	}
 }

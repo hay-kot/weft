@@ -72,12 +72,12 @@ type NodeState struct {
 	State events.State `json:"state"`
 	// Attempt is the node's latest attempt. For a pending node it is the
 	// attempt it will run as; zero means the node never ran in this run.
-	Attempt  int       `json:"attempt"`
-	ExitCode int       `json:"exit_code"`
-	Reason   string    `json:"reason,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Started  time.Time `json:"started,omitzero"`
-	Finished time.Time `json:"finished,omitzero"`
+	Attempt  int           `json:"attempt"`
+	ExitCode int           `json:"exit_code"`
+	Reason   events.Reason `json:"reason,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Started  time.Time     `json:"started,omitzero"`
+	Finished time.Time     `json:"finished,omitzero"`
 	// Log is the attempt's output log, relative to the run directory.
 	Log string `json:"log,omitempty"`
 	// PGID is the process group of a running attempt. A resume checks it

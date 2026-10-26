@@ -9,7 +9,12 @@ import (
 // State is a node's lifecycle state.
 type State string
 
-// Node states. See the design doc for the transition rules.
+// Node states. A node starts pending and turns ready once its needs
+// succeed. A ready interactive node waits while other nodes run, then runs
+// with the terminal. A running node ends succeeded, failed, or canceled.
+// A node that has not started can instead end blocked (a need failed) or
+// canceled. Skipped and excluded nodes start in that state and never run.
+// A rerun puts a finished node back to pending with the next attempt.
 const (
 	Pending   State = "pending"
 	Ready     State = "ready"
@@ -34,6 +39,31 @@ func (s State) Terminal() bool {
 		return false
 	}
 }
+
+// Reason says why a node reached its terminal state.
+type Reason string
+
+// Node end reasons.
+const (
+	// ReasonExit: the process exited on its own, with any exit code.
+	ReasonExit Reason = "exit"
+	// ReasonTimeout: the node ran past its timeout and was stopped.
+	ReasonTimeout Reason = "timeout"
+	// ReasonCanceled: a cancel stopped the node, or it never started.
+	ReasonCanceled Reason = "canceled"
+	// ReasonBlocked: a need did not succeed, so the node never started.
+	ReasonBlocked Reason = "blocked"
+	// ReasonStartError: weft could not start the process.
+	ReasonStartError Reason = "start_error"
+	// ReasonSkipped: a resume kept the node's success from an earlier
+	// attempt.
+	ReasonSkipped Reason = "skipped"
+	// ReasonExcluded: the node is outside the selection of this start.
+	ReasonExcluded Reason = "excluded"
+	// ReasonAbandoned: the weft that ran the attempt died before it ended,
+	// and a later start found the attempt gone.
+	ReasonAbandoned Reason = "abandoned"
+)
 
 // Event is one of RunStarted, NodeChanged, NodeOutput, OutputDropped,
 // RunFinished, or Barrier.
@@ -66,9 +96,8 @@ type NodeChanged struct {
 	// Err explains failures that are not a plain non-zero exit, such as a
 	// timeout or a start error.
 	Err string `json:"error,omitempty"`
-	// Reason is set for terminal states: exit, timeout, canceled, blocked,
-	// start_error, skipped, or excluded.
-	Reason string `json:"reason,omitempty"`
+	// Reason is set for terminal states.
+	Reason Reason `json:"reason,omitempty"`
 	// Started is set once the node starts running.
 	Started  time.Time `json:"started,omitzero"`
 	Finished time.Time `json:"finished,omitzero"`

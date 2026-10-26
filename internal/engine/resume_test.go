@@ -84,7 +84,7 @@ func TestResumeRunsOnlyWhatDidNotSucceed(t *testing.T) {
 	release := lastChange(h.events, "release")
 	assert.Equal(t, events.Skipped, release.State)
 	assert.Equal(t, 1, release.Attempt)
-	assert.Equal(t, "skipped", release.Reason)
+	assert.Equal(t, events.ReasonSkipped, release.Reason)
 	assert.Equal(t, time.Unix(160, 0), release.Finished, "a skipped node keeps its earlier times")
 	assert.Equal(t, 2, lastChange(h.events, "deploy").Attempt)
 	assert.Equal(t, []events.State{events.Skipped}, h.transitions("guard"))
@@ -118,7 +118,7 @@ nodes:
 	assert.True(t, s.Success)
 	assert.Equal(t, events.Excluded, s.States["c"])
 	assert.ElementsMatch(t, []string{"a", "b"}, h.fake.started)
-	assert.Equal(t, "excluded", lastChange(h.events, "c").Reason)
+	assert.Equal(t, events.ReasonExcluded, lastChange(h.events, "c").Reason)
 	assert.Equal(t, 0, lastChange(h.events, "c").Attempt)
 }
 

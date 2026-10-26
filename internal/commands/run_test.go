@@ -4,6 +4,7 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -32,10 +33,20 @@ func TestAsyncWriterNeverBlocks(t *testing.T) {
 	abort := make(chan struct{})
 	close(abort)
 	assert.False(t, a.Close(time.Hour, abort), "Close gives up on abort")
-	start := time.Now()
-	assert.False(t, a.Close(50*time.Millisecond, nil), "Close gives up after the timeout")
-	assert.Less(t, time.Since(start), time.Second)
 	_, _ = a.Write([]byte("after close"))
+}
+
+func TestAsyncWriterCloseTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r, w := io.Pipe()
+		a := newAsyncWriter(w, 4)
+		_, _ = a.Write([]byte("never read\n"))
+
+		start := time.Now()
+		assert.False(t, a.Close(50*time.Millisecond, nil), "Close gives up after the timeout")
+		assert.Equal(t, 50*time.Millisecond, time.Since(start))
+		_ = r.Close()
+	})
 }
 
 func TestAsyncWriterFlushesOnClose(t *testing.T) {
@@ -64,23 +75,31 @@ func TestWaitForOutput(t *testing.T) {
 	})
 
 	t.Run("stalled", func(t *testing.T) {
-		start := time.Now()
-		assert.False(t, waitForOutput(never, func() int64 { return 7 }, 100*time.Millisecond, never))
-		assert.Less(t, time.Since(start), time.Second)
+		synctest.Test(t, func(t *testing.T) {
+			never := make(chan struct{})
+			start := time.Now()
+			assert.False(t, waitForOutput(never, func() int64 { return 7 }, 100*time.Millisecond, never))
+			assert.Equal(t, 100*time.Millisecond, time.Since(start))
+		})
 	})
 
 	t.Run("progressing", func(t *testing.T) {
-		var n atomic.Int64
-		done := make(chan struct{})
-		go func() {
-			for range 30 {
-				n.Add(1)
-				time.Sleep(10 * time.Millisecond)
-			}
-			close(done)
-		}()
-		// 300ms of steady progress outlasts a 100ms stall window.
-		assert.True(t, waitForOutput(done, n.Load, 100*time.Millisecond, never))
+		synctest.Test(t, func(t *testing.T) {
+			never := make(chan struct{})
+			var n atomic.Int64
+			done := make(chan struct{})
+			go func() {
+				for range 30 {
+					n.Add(1)
+					time.Sleep(10 * time.Millisecond)
+				}
+				close(done)
+			}()
+			// 300ms of steady progress outlasts a 100ms stall window.
+			start := time.Now()
+			assert.True(t, waitForOutput(done, n.Load, 100*time.Millisecond, never))
+			assert.Equal(t, 300*time.Millisecond, time.Since(start))
+		})
 	})
 
 	t.Run("abort", func(t *testing.T) {
@@ -120,6 +139,28 @@ func TestPickUI(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestNodeEnvColor(t *testing.T) {
+	const path = "PATH=/bin"
+	base := []string{path}
+	tests := []struct {
+		name    string
+		base    []string
+		tty     bool
+		noColor bool
+		want    []string
+	}{
+		{"tty forces color", base, true, false, []string{path, "CLICOLOR_FORCE=1", "FORCE_COLOR=1"}},
+		{"no tty leaves color alone", base, false, false, []string{path}},
+		{"--no-color on a tty", base, true, true, []string{path, "NO_COLOR=1"}},
+		{"NO_COLOR already set", []string{path, "NO_COLOR=yes"}, true, true, []string{path, "NO_COLOR=yes"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, nodeEnv(tt.base, tt.tty, tt.noColor))
 		})
 	}
 }

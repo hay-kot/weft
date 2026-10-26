@@ -413,7 +413,7 @@ nodes:
 
 	var rec store.AttemptRecord
 	readJSON(t, h.run.AttemptRecordPath("b", 1), &rec)
-	assert.Equal(t, "blocked", rec.Reason)
+	assert.Equal(t, events.ReasonBlocked, rec.Reason)
 	assert.Equal(t, "blocked", rec.State)
 	assert.Empty(t, rec.Log)
 }
@@ -502,7 +502,7 @@ nodes:
 
 	var rec store.AttemptRecord
 	readJSON(t, h.run.AttemptRecordPath("prompt", 1), &rec)
-	assert.Equal(t, "start_error", rec.Reason)
+	assert.Equal(t, events.ReasonStartError, rec.Reason)
 	assert.Contains(t, rec.Error, "no tty")
 }
 
@@ -682,14 +682,14 @@ func TestAttemptRecords(t *testing.T) {
 	assert.Equal(t, 1, rec.Attempt)
 	assert.Equal(t, "deploy", rec.Command)
 	assert.Equal(t, "failed", rec.State)
-	assert.Equal(t, "exit", rec.Reason)
+	assert.Equal(t, events.ReasonExit, rec.Reason)
 	assert.Equal(t, 2, rec.ExitCode)
 	assert.Equal(t, "nodes/deploy/1.log", rec.Log)
 	assert.False(t, rec.Started.IsZero())
 	assert.False(t, rec.Finished.Before(rec.Started))
 
 	readJSON(t, h.run.AttemptRecordPath("tofu-apply", 1), &rec)
-	assert.Equal(t, "blocked", rec.Reason)
+	assert.Equal(t, events.ReasonBlocked, rec.Reason)
 }
 
 func readFile(path string) (string, error) {

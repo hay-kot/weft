@@ -132,7 +132,7 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 		// The session leader's process group ID is its PID, as with Setpgid.
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		var err error
-		output, err = newOutputPipe(spec.Output)
+		output, err = newOutputPipe(spec.Output, spec.Log)
 		if err != nil {
 			return startFailure(err)
 		}
@@ -315,7 +315,7 @@ type outputPipe struct {
 	done chan struct{}
 }
 
-func newOutputPipe(dst io.Writer) (*outputPipe, error) {
+func newOutputPipe(dst io.Writer, log zerolog.Logger) (*outputPipe, error) {
 	if dst == nil {
 		dst = io.Discard
 	}
@@ -326,7 +326,12 @@ func newOutputPipe(dst io.Writer) (*outputPipe, error) {
 	o := &outputPipe{r: r, w: w, done: make(chan struct{})}
 	go func() {
 		defer close(o.done)
-		_, _ = io.Copy(dst, r)
+		if _, err := io.Copy(dst, r); err != nil {
+			// Keep reading after a failed write, or a node that prints a
+			// lot blocks on a full pipe until its timeout.
+			log.Error().Err(err).Msg("write node output; discarding the rest")
+			_, _ = io.Copy(io.Discard, r)
+		}
 	}()
 	return o, nil
 }

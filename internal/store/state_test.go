@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -122,21 +123,40 @@ func TestLatestAndOpen(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNoRuns)
 
 	base := filepath.Join(root, ".weft", "runs", "deploy")
-	for _, id := range []string{"20260102T000000-bbbb", "20260101T000000-aaaa"} {
+	for _, id := range []string{"20260102T000000.000-bbbb", "20260101T000000.000-aaaa"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(base, id), 0o700))
 	}
 	require.NoError(t, os.MkdirAll(filepath.Join(base, "zzz-not-a-run"), 0o700))
 
 	latest, err := store.Latest(root, "deploy")
 	require.NoError(t, err)
-	assert.Equal(t, "20260102T000000-bbbb", latest.ID)
+	assert.Equal(t, "20260102T000000.000-bbbb", latest.ID)
 	assert.Equal(t, filepath.Join(base, latest.ID), latest.Dir)
 	assert.Equal(t, "deploy", latest.Workflow)
 
-	_, err = store.Open(root, "deploy", "20260103T000000-cccc")
+	_, err = store.Open(root, "deploy", "20260103T000000.000-cccc")
 	require.ErrorContains(t, err, "does not exist")
 	_, err = store.Open(root, "deploy", "../etc")
 	require.ErrorContains(t, err, "not a run ID")
+}
+
+func TestLatestAfterRunsInTheSameMillisecond(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	var created []string
+	for range 5 {
+		created = append(created, mustCreate(t, root, now).ID)
+	}
+	assert.True(t, slices.IsSorted(created), "ids %v", created)
+
+	latest, err := store.Latest(root, "deploy")
+	require.NoError(t, err)
+	assert.Equal(t, created[len(created)-1], latest.ID)
+
+	earlier := mustCreate(t, root, now.Add(-time.Hour))
+	assert.Greater(t, earlier.ID, created[len(created)-1], "a clock step back must still sort last")
 }
 
 func TestPruneSkipsLockedRuns(t *testing.T) {
@@ -144,7 +164,7 @@ func TestPruneSkipsLockedRuns(t *testing.T) {
 
 	root := t.TempDir()
 	base := filepath.Join(root, ".weft", "runs", "deploy")
-	ids := []string{"20260101T000000-aaaa", "20260102T000000-bbbb", "20260103T000000-cccc"}
+	ids := []string{"20260101T000000.000-aaaa", "20260102T000000.000-bbbb", "20260103T000000.000-cccc"}
 	for _, id := range ids {
 		require.NoError(t, os.MkdirAll(filepath.Join(base, id), 0o700))
 	}

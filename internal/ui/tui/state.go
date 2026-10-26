@@ -17,7 +17,7 @@ type nodeStatus struct {
 	Attempt  int
 	ExitCode int
 	Err      string
-	Reason   string
+	Reason   events.Reason
 	Started  time.Time
 	Finished time.Time
 }
@@ -119,7 +119,7 @@ func (rs *runState) counts() map[events.State]int {
 
 // nodeDuration returns how long a node has run and whether it has started.
 func nodeDuration(st *nodeStatus, now time.Time) (time.Duration, bool) {
-	if st == nil || st.Started.IsZero() || st.Reason == "start_error" {
+	if st == nil || st.Started.IsZero() || st.Reason == events.ReasonStartError {
 		return 0, false
 	}
 	end := now

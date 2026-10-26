@@ -1,5 +1,5 @@
- deploy  running  0:10  4/7 done                       run 20261025T191200-a3f9
- run dir /repo/.weft/runs/deploy/20261025T191200-a3f9
+ deploy  running  0:10  4/7 done                   run 20261025T191200.000-a3f9
+ run dir /repo/.weft/runs/deploy/20261025T191200.000-a3f9
 ────────────────────────────────────────────────────────────────────────────────
                      ✓ guard 0:00
                           │

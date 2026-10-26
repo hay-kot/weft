@@ -97,7 +97,7 @@ func (r *Renderer) Render(e events.Event) {
 
 func (r *Renderer) state(e events.NodeChanged) {
 	dur := ""
-	if !e.Started.IsZero() && !e.Finished.IsZero() && e.Reason != "start_error" {
+	if !e.Started.IsZero() && !e.Finished.IsZero() && e.Reason != events.ReasonStartError {
 		dur = " in " + ui.FormatDuration(e.Finished.Sub(e.Started))
 	}
 	attempt := ""
@@ -143,8 +143,11 @@ func (r *Renderer) line(node, mark, sgr, text string) {
 }
 
 // lastSegment keeps what a terminal would show after carriage returns
-// redraw the line, so progress bars print once instead of as a smear.
+// redraw the line, so progress bars print once instead of as a smear. A
+// trailing \r, as on a final progress frame without a newline, redraws
+// nothing, so it does not blank the line.
 func lastSegment(line string) string {
+	line = strings.TrimRight(line, "\r")
 	if _, after, found := strings.CutLast(line, "\r"); found {
 		return after
 	}

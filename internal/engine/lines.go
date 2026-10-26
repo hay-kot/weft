@@ -2,8 +2,11 @@ package engine
 
 import (
 	"bytes"
+	"io"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/rs/zerolog"
 )
 
 // MaxLineBytes caps one output line. Longer lines are split so a node that
@@ -74,4 +77,24 @@ func (w *lineWriter) Flush() {
 		w.emit(string(w.buf))
 		w.buf = nil
 	}
+}
+
+// bestEffort passes writes to w until the first error, logs it once, and
+// then discards. It always reports success, so a full disk under the node
+// log does not stop the output reaching the UI through an io.MultiWriter.
+type bestEffort struct {
+	w      io.Writer
+	failed bool
+	log    zerolog.Logger
+}
+
+func (b *bestEffort) Write(p []byte) (int, error) {
+	if b.failed {
+		return len(p), nil
+	}
+	if _, err := b.w.Write(p); err != nil {
+		b.failed = true
+		b.log.Error().Err(err).Msg("write node log; discarding the rest of this attempt's log")
+	}
+	return len(p), nil
 }

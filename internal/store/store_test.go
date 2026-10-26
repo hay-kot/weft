@@ -17,7 +17,7 @@ import (
 	"github.com/hay-kot/weft/internal/store"
 )
 
-var runIDPattern = regexp.MustCompile(`^\d{8}T\d{6}-[0-9a-f]{4}$`)
+var runIDPattern = regexp.MustCompile(`^\d{8}T\d{6}\.\d{3}-[0-9a-f]{4}$`)
 
 func mustCreate(t *testing.T, root string, now time.Time) *store.Run {
 	t.Helper()
@@ -37,7 +37,7 @@ func TestNewID(t *testing.T) {
 		id, err := store.NewID(now)
 		require.NoError(t, err)
 		assert.Regexp(t, runIDPattern, id)
-		assert.True(t, strings.HasPrefix(id, "20260304T100607-"), "id %q", id)
+		assert.True(t, strings.HasPrefix(id, "20260304T100607.000-"), "id %q", id)
 	})
 
 	t.Run("later times sort later", func(t *testing.T) {
@@ -179,17 +179,17 @@ func TestPrune(t *testing.T) {
 		root := t.TempDir()
 		base := filepath.Join(root, ".weft", "runs", "deploy")
 		runIDs := []string{
-			"20260101T000000-aaaa",
-			"20260102T000000-bbbb",
-			"20260103T000000-cccc",
-			"20260104T000000-dddd",
-			"20260105T000000-eeee",
+			"20260101T000000.000-aaaa",
+			"20260102T000000.000-bbbb",
+			"20260103T000000.000-cccc",
+			"20260104T000000.000-dddd",
+			"20260105T000000.000-eeee",
 		}
 		for _, id := range runIDs {
 			require.NoError(t, os.MkdirAll(filepath.Join(base, id), 0o700))
 		}
 		require.NoError(t, os.MkdirAll(filepath.Join(base, "scratch"), 0o700))
-		require.NoError(t, os.WriteFile(filepath.Join(base, "20260101T000000-ffff.txt"), nil, 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(base, "20260101T000000.000-ffff.txt"), nil, 0o600))
 
 		require.NoError(t, store.Prune(root, "deploy", 2))
 
@@ -200,9 +200,9 @@ func TestPrune(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		assert.Equal(t, []string{
-			"20260101T000000-ffff.txt",
-			"20260104T000000-dddd",
-			"20260105T000000-eeee",
+			"20260101T000000.000-ffff.txt",
+			"20260104T000000.000-dddd",
+			"20260105T000000.000-eeee",
 			"scratch",
 		}, names)
 	})

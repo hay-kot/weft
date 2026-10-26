@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 
 	"github.com/hay-kot/weft/internal/workflow"
 )
@@ -550,20 +551,30 @@ func (c *canvas) set(x, y int, text string, edges ...int) {
 	}
 }
 
+// text walks grapheme clusters, not runes, because cells are sized by
+// grapheme width: a ZWJ emoji is one wide glyph, not several.
 func (c *canvas) text(x, y int, s, node string) {
-	for _, r := range s {
-		w := ansi.StringWidth(string(r))
+	gr := uniseg.NewGraphemes(s)
+	for gr.Next() {
+		cluster := gr.Str()
+		w := ansi.StringWidth(cluster)
 		if w == 0 {
 			continue
 		}
-		c.set(x, y, string(r))
-		c.glyphs[y][x].Node = node
-		if w == 2 {
-			c.set(x+1, y, "")
-			c.glyphs[y][x+1].Node = node
+		c.setNode(x, y, cluster, node)
+		for i := 1; i < w; i++ {
+			c.setNode(x+i, y, "", node)
 		}
 		x += w
 	}
+}
+
+func (c *canvas) setNode(x, y int, text, node string) {
+	if y < 0 || y >= len(c.glyphs) || x < 0 || x >= len(c.glyphs[y]) {
+		return
+	}
+	c.set(x, y, text)
+	c.glyphs[y][x].Node = node
 }
 
 // junctions maps up|down|left|right bits to the box glyph that joins them.

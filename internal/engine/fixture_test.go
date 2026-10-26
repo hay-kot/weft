@@ -85,9 +85,8 @@ func TestFixtureDeployFailureBlocksTofu(t *testing.T) {
 	assert.Equal(t, events.Blocked, s.States["tofu-apply"])
 }
 
-// TestFixtureResumeRerunsDeployAndSkipsRelease is the M4 "done when": with
-// deploy failing, a resume of the same run reruns deploy, skips release,
-// and deploys the tag the first attempt of release recorded.
+// With deploy failing, a resume of the same run reruns deploy, skips
+// release, and deploys the tag the first attempt of release recorded.
 func TestFixtureResumeRerunsDeployAndSkipsRelease(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs real processes for several seconds")

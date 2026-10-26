@@ -37,6 +37,7 @@ func TestRender(t *testing.T) {
 		changed("build", events.Running, "", 0),
 		events.NodeOutput{Node: "build", Line: "compiling"},
 		events.NodeOutput{Node: "build", Line: "10%\r50%\r100%"},
+		events.NodeOutput{Node: "build", Line: "done 100%\r"},
 		changed("build", events.Failed, "exit code 2", 65*time.Second),
 		changed("long-name", events.Waiting, "", 0),
 		changed("long-name", events.Blocked, "blocked: build failed", 0),
@@ -49,6 +50,7 @@ func TestRender(t *testing.T) {
 		"build     ▶ started\n" +
 		"build     │ compiling\n" +
 		"build     │ 100%\n" +
+		"build     │ done 100%\n" +
 		"build     ✗ failed: exit code 2 in 1:05\n" +
 		"Long Name ◆ waiting for the terminal\n" +
 		"Long Name ⊘ blocked: build failed\n"

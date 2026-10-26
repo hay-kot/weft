@@ -47,12 +47,12 @@ func ns(state events.State, attempt int) store.NodeState {
 // prior builds an earlier run's state from node states.
 func prior(nodes map[string]store.NodeState) *store.State {
 	return &store.State{
-		Version: store.StateVersion, RunID: "20261025T191200-a3f9", Workflow: nDeploy, WorkflowPath: "",
+		Version: store.StateVersion, RunID: "20261025T191200.000-a3f9", Workflow: nDeploy, WorkflowPath: "",
 		Created: time.Time{}, Updated: time.Time{}, History: nil, Nodes: nodes,
 	}
 }
 
-// deployFailed is the earlier run in the M4 "done when": deploy failed, so
+// deployFailed is a run of the deploy fixture where deploy failed, so
 // tofu-apply was blocked.
 func deployFailed() *store.State {
 	return prior(map[string]store.NodeState{
@@ -241,13 +241,13 @@ func TestFrom(t *testing.T) {
 				nRelease: ns(events.Failed, 1),
 			}),
 			from: nDeploy,
-			err:  "deploy needs release, which is not selected and did not succeed in the latest run 20261025T191200-a3f9 (it is failed)",
+			err:  "deploy needs release, which is not selected and did not succeed in the latest run 20261025T191200.000-a3f9 (it is failed)",
 		},
 		{
 			name:  "need never ran",
 			prior: prior(map[string]store.NodeState{}),
 			from:  nDeploy,
-			err:   "deploy needs release, which is not selected and never ran in the latest run 20261025T191200-a3f9",
+			err:   "deploy needs release, which is not selected and never ran in the latest run 20261025T191200.000-a3f9",
 		},
 		{
 			name:  "no earlier run",

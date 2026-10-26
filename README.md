@@ -100,8 +100,8 @@ When stdin and stdout are terminals and `CI` is unset, `weft run` shows the
 graph live, with the selected node's output under it:
 
 ```text
- deploy  running  1:33  4/7 done                                   run 20261025T191200-a3f9
- run dir /src/app/.weft/runs/deploy/20261025T191200-a3f9
+ deploy  running  1:33  4/7 done                               run 20261025T191200.482-a3f9
+ run dir /src/app/.weft/runs/deploy/20261025T191200.482-a3f9
 ───────────────────────────────────────────────────────────────────────────────────────────
                ┌─▸ ✓ go-check  0:02 ─┐
  ✓ guard 0:00 ─┼─▸ ✓ ui-check  0:02 ─┼─▸ ⠹ release 1:31 ───▸ ○ deploy ───▸ ○ tofu-apply
@@ -235,7 +235,7 @@ Global flags: `--log-level` (or `WEFT_LOG_LEVEL`) and `--no-color` (or
 
 ## Run directories and logs
 
-Each run gets a sortable ID such as `20261025T191200-a3f9` and a directory
+Each run gets a sortable ID such as `20261025T191200.482-a3f9` and a directory
 at `.weft/runs/<workflow>/<run-id>/`. The TUI shows both in its header, and
 weft prints them to stderr when the run ends (and when it starts, in plain
 mode). The newest 20 runs per workflow are kept; a run another weft is using is
@@ -243,7 +243,7 @@ never pruned. On first use weft
 writes `.weft/.gitignore` so runs stay out of git.
 
 ```text
-.weft/runs/deploy/20261025T191200-a3f9/
+.weft/runs/deploy/20261025T191200.482-a3f9/
   weft.log                 weft's own JSON log; every line has run_id
   state.json               node states, attempts, and logs; history of starts
   lock                     held by the weft using the run

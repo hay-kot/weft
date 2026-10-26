@@ -285,7 +285,7 @@ func TestPlanSeedsStatesBeforeEvents(t *testing.T) {
 	assert.Equal(t, events.Skipped, m.rs.state(nRelease))
 	assert.Equal(t, events.Pending, m.rs.state(nDeploy))
 	assert.Equal(t, 2, m.rs.nodes[nDeploy].Attempt)
-	assert.Equal(t, "skipped: it succeeded in attempt 1, whose output is in /repo/.weft/runs/deploy/20261025T191200-a3f9/nodes/release/1.log",
+	assert.Equal(t, "skipped: it succeeded in attempt 1, whose output is in /repo/.weft/runs/deploy/20261025T191200.000-a3f9/nodes/release/1.log",
 		placeholder(m.rs, nRelease))
 }
 
@@ -293,7 +293,7 @@ func TestGoldenResumed(t *testing.T) {
 	m := New(Options{
 		Workflow: deployWorkflow(t), Run: testRun(), ExitOnEnd: false, Interrupt: nil,
 		Plan: resumedPlan(), Confirm: "", Start: nil, Rerun: nil,
-		Notice: "--resume continues run 20261025T191200-a3f9: running deploy, tofu-apply; skipping 5 that succeeded",
+		Notice: "--resume continues run 20261025T191200.000-a3f9: running deploy, tofu-apply; skipping 5 that succeeded",
 		Log:    zerolog.Nop(),
 	})
 	m = send(t, m, tickMsg{at: at(30)}, tea.WindowSizeMsg{Width: 120, Height: 30},

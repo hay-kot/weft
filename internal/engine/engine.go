@@ -94,7 +94,7 @@ type nodeRun struct {
 	started  time.Time
 	finished time.Time
 	exitCode int
-	reason   string
+	reason   events.Reason
 	errText  string
 	// log is the latest attempt's output log, relative to the run dir.
 	log    string
@@ -184,7 +184,10 @@ func New(opts Options) *Engine {
 		case events.Skipped, events.Excluded:
 			nr.started, nr.finished, nr.exitCode = pn.Prior.Started, pn.Prior.Finished, pn.Prior.ExitCode
 			nr.log = pn.Prior.Log
-			nr.reason = string(pn.State)
+			nr.reason = events.ReasonSkipped
+			if pn.State == events.Excluded {
+				nr.reason = events.ReasonExcluded
+			}
 		default:
 			nr.state = events.Pending
 		}
@@ -667,13 +670,13 @@ func (e *Engine) cancelBeforeStart(nr *nodeRun) {
 	e.log.Debug().Str("node", nr.node.ID).Str("from", string(nr.state)).Msg("node canceled before start")
 	nr.state = events.Canceled
 	nr.finished = time.Now()
-	e.end(nr, runner.Result{ExitCode: -1, Signal: "", Reason: runner.ReasonCanceled, Err: nil}, "canceled before start", "")
+	e.end(nr, events.ReasonCanceled, runner.Result{ExitCode: -1, Signal: "", Reason: runner.ReasonCanceled, Err: nil}, "canceled before start", "")
 }
 
 func (e *Engine) block(nr *nodeRun, why string) {
 	nr.state = events.Blocked
 	nr.finished = time.Now()
-	e.end(nr, runner.Result{ExitCode: -1, Signal: "", Reason: "blocked", Err: nil}, "blocked: "+why, "")
+	e.end(nr, events.ReasonBlocked, runner.Result{ExitCode: -1, Signal: "", Reason: "", Err: nil}, "blocked: "+why, "")
 }
 
 func (e *Engine) nodeLog(nr *nodeRun) zerolog.Logger {
@@ -738,7 +741,7 @@ func (e *Engine) start(ctx context.Context, nr *nodeRun) {
 	lines := newLineWriter(func(line string) {
 		e.publish(events.NodeOutput{Node: id, Line: line})
 	})
-	spec.Output = io.MultiWriter(logFile, lines)
+	spec.Output = io.MultiWriter(&bestEffort{w: logFile, failed: false, log: log}, lines)
 	go func() {
 		defer cancel()
 		res := e.opts.Runner.Run(ctx, spec)
@@ -812,15 +815,28 @@ func (e *Engine) finish(id string, res runner.Result) {
 	if nr.state != events.Succeeded {
 		errText = describe(res)
 	}
-	e.end(nr, res, errText, nr.log)
+	e.end(nr, endReason(res.Reason), res, errText, nr.log)
 }
 
 // end records a node's terminal state: the attempt record on disk, then
 // the event.
-func (e *Engine) end(nr *nodeRun, res runner.Result, errText, logPath string) {
-	nr.exitCode, nr.reason, nr.errText, nr.log = res.ExitCode, string(res.Reason), errText, logPath
+func (e *Engine) end(nr *nodeRun, reason events.Reason, res runner.Result, errText, logPath string) {
+	nr.exitCode, nr.reason, nr.errText, nr.log = res.ExitCode, reason, errText, logPath
 	e.writeRecord(nr, res)
 	e.publishNode(nr)
+}
+
+func endReason(r runner.Reason) events.Reason {
+	switch r {
+	case runner.ReasonTimeout:
+		return events.ReasonTimeout
+	case runner.ReasonCanceled:
+		return events.ReasonCanceled
+	case runner.ReasonStartErr:
+		return events.ReasonStartError
+	case runner.ReasonExit:
+	}
+	return events.ReasonExit
 }
 
 // describe renders a result for humans: "exit code 3", "timed out", ...
@@ -859,7 +875,7 @@ func (e *Engine) writeRecord(nr *nodeRun, res runner.Result) {
 		Dir:         filepath.Join(e.opts.Workflow.Root, nr.node.Dir),
 		Interactive: nr.node.Interactive,
 		State:       string(nr.state),
-		Reason:      string(res.Reason),
+		Reason:      nr.reason,
 		ExitCode:    res.ExitCode,
 		Signal:      res.Signal,
 		Error:       errText,

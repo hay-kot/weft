@@ -168,6 +168,19 @@ func TestWideLabels(t *testing.T) {
 	assert.Equal(t, 4, g.Boxes["a"].Width)
 }
 
+func TestGraphemeClusterLabels(t *testing.T) {
+	family := "👨\u200d👩\u200d👧 family"
+	g := layout.Layout(graph(node("a"), node("b", "a")), layout.Options{
+		Width: 0, Orientation: layout.Horizontal, MaxCellWidth: 0,
+		Cell: func(id string) layout.Cell {
+			return layout.Cell{Prefix: "", Label: map[string]string{"a": family, "b": family}[id], Suffix: ""}
+		},
+	})
+	assert.Equal(t, family+" ───▸ "+family, g.String())
+	assert.Equal(t, 9, g.Boxes["b"].Width)
+	assert.Equal(t, "b", g.At(g.Width-1, 0).Node)
+}
+
 func TestFromWorkflow(t *testing.T) {
 	wf, err := workflow.Parse([]byte("nodes:\n  a: {run: x}\n  b: {run: y, needs: [a]}\n"))
 	require.NoError(t, err)

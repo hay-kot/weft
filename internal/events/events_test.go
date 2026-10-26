@@ -3,6 +3,7 @@ package events_test
 import (
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -127,11 +128,20 @@ func TestBarrier(t *testing.T) {
 	assert.Equal(t, []events.Event{events.NodeOutput{Node: "n", Line: "before"}}, seen,
 		"the barrier comes after everything published before it")
 
-	stalled := bus.Subscribe(0)
-	start := time.Now()
-	assert.False(t, stalled.Barrier(50*time.Millisecond), "an unread subscriber times out")
-	assert.Less(t, time.Since(start), time.Second)
 	bus.Close()
+}
+
+func TestBarrierTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		bus := events.NewBus()
+		stalled := bus.Subscribe(0)
+		start := time.Now()
+		assert.False(t, stalled.Barrier(50*time.Millisecond), "an unread subscriber times out")
+		assert.Equal(t, 50*time.Millisecond, time.Since(start))
+		bus.Close()
+		for range stalled.C {
+		}
+	})
 }
 
 func TestTerminalStates(t *testing.T) {
