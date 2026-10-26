@@ -236,14 +236,20 @@ func (p graphPane) classify(x, y int, gl layout.Glyph, rs *runState, active map[
 		sel := gl.Node == p.selected
 		b := p.grid.Boxes[gl.Node]
 		off := x - b.X
-		suffixW := ansi.StringWidth(p.cells[gl.Node].Suffix)
+		cell := p.cells[gl.Node]
+		suffixStart := b.Width - ansi.StringWidth(cell.Suffix)
+		labelStart := ansi.StringWidth(cell.Prefix)
+		labelEnd := min(labelStart+ansi.StringWidth(cell.Label), suffixStart)
 		switch {
 		case y == b.Y && off == 0:
-			return glyphClass{kind: glyphIcon, state: st, selected: sel}
-		case off >= b.Width-suffixW:
-			return glyphClass{kind: glyphSuffix, state: st, selected: sel}
+			return glyphClass{kind: glyphIcon, state: st, selected: false}
+		case off >= suffixStart:
+			return glyphClass{kind: glyphSuffix, state: st, selected: false}
 		default:
-			return glyphClass{kind: glyphLabel, state: st, selected: sel}
+			// Only the label text carries the selection, so the marker
+			// never runs under the padding or into the icon's state color.
+			onText := off >= labelStart && off < labelEnd
+			return glyphClass{kind: glyphLabel, state: st, selected: sel && onText}
 		}
 	}
 	for _, e := range gl.Edges {
@@ -267,17 +273,18 @@ func (c glyphClass) style(s Styles) lipgloss.Style {
 	case glyphIcon:
 		st = s.State(c.state)
 	case glyphLabel:
-		st = lipgloss.NewStyle()
-		if c.state == events.Pending || c.state == events.Ready {
+		switch {
+		case c.selected:
+			st = s.Selected
+		case c.state == events.Pending || c.state == events.Ready:
 			st = s.Dim
+		default:
+			st = lipgloss.NewStyle()
 		}
 	case glyphSuffix:
 		st = s.Dim
 	case glyphBlank:
 		return lipgloss.NewStyle()
-	}
-	if c.selected {
-		st = st.Inherit(s.Selected)
 	}
 	return st
 }

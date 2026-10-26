@@ -16,8 +16,9 @@ type Styles struct {
 	Rule       lipgloss.Style
 	Edge       lipgloss.Style
 	EdgeActive lipgloss.Style
-	// Selected marks the selected node's cell. Reverse video stays visible
-	// without color.
+	// Selected marks the selected node's label. Bold and underline stay
+	// visible without color and take no extra columns, so the layout does
+	// not move with the selection.
 	Selected lipgloss.Style
 	Notice   lipgloss.Style
 	Error    lipgloss.Style
@@ -50,7 +51,7 @@ func DefaultStyles() Styles {
 		Rule:       dim,
 		Edge:       dim,
 		EdgeActive: base.Bold(true),
-		Selected:   base.Reverse(true),
+		Selected:   base.Bold(true).Underline(true).UnderlineSpaces(true),
 		Notice:     base.Foreground(lipgloss.Yellow),
 		Error:      base.Foreground(lipgloss.Red),
 		Help:       h,

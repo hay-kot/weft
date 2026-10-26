@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/golden"
 	"github.com/stretchr/testify/assert"
@@ -155,7 +157,8 @@ func TestGraphSelectUnknownNodeKeepsSelection(t *testing.T) {
 func TestGraphClassify(t *testing.T) {
 	p, rs := deployPane(t, 200, 20)
 	rs.nodes[nRelease].State = events.Running
-	p = p.selectNode(nRelease)
+	rs.nodes[nRelease].Started = t0
+	p = p.withCells(rs.cells(t0)).selectNode(nRelease)
 	active := map[int]bool{}
 	for _, e := range p.grid.EdgesOf(nRelease) {
 		active[e] = true
@@ -163,9 +166,11 @@ func TestGraphClassify(t *testing.T) {
 
 	b := p.grid.Boxes[nRelease]
 	icon := p.classify(b.X, b.Y, p.grid.At(b.X, b.Y), rs, active)
-	assert.Equal(t, glyphClass{kind: glyphIcon, state: events.Running, selected: true}, icon)
+	assert.Equal(t, glyphClass{kind: glyphIcon, state: events.Running, selected: false}, icon)
 	label := p.classify(b.X+2, b.Y, p.grid.At(b.X+2, b.Y), rs, active)
-	assert.Equal(t, glyphLabel, label.kind)
+	assert.Equal(t, glyphClass{kind: glyphLabel, state: events.Running, selected: true}, label)
+	suffix := p.classify(b.X+b.Width-1, b.Y, p.grid.At(b.X+b.Width-1, b.Y), rs, active)
+	assert.Equal(t, glyphClass{kind: glyphSuffix, state: events.Running, selected: false}, suffix)
 
 	// The gutter between release and deploy carries release's edge.
 	edge := p.classify(b.X+b.Width+1, b.Y, p.grid.At(b.X+b.Width+1, b.Y), rs, active)
@@ -175,6 +180,63 @@ func TestGraphClassify(t *testing.T) {
 	g := p.grid.Boxes[nGuard]
 	other := p.classify(g.X+g.Width+1, g.Y, p.grid.At(g.X+g.Width+1, g.Y), rs, active)
 	assert.Equal(t, glyphEdge, other.kind)
+}
+
+// markedText returns, per line, the text drawn bold and underlined, and
+// reports whether any cell is drawn in reverse video.
+func markedText(view string) ([]string, bool) {
+	ss := uv.NewStyledString(view)
+	area := ss.Bounds()
+	buf := uv.NewScreenBuffer(area.Dx(), area.Dy())
+	ss.Draw(buf, area)
+	var marked []string
+	reverse := false
+	for y := range area.Dy() {
+		var line strings.Builder
+		for x := range area.Dx() {
+			c := buf.CellAt(x, y)
+			if c == nil {
+				continue
+			}
+			if c.Style.Attrs&uv.AttrReverse != 0 {
+				reverse = true
+			}
+			if c.Style.Attrs&uv.AttrBold != 0 && c.Style.Underline != uv.UnderlineNone {
+				line.WriteString(c.Content)
+			}
+		}
+		if line.Len() > 0 {
+			marked = append(marked, line.String())
+		}
+	}
+	return marked, reverse
+}
+
+func TestGraphViewSelectionMarker(t *testing.T) {
+	p, rs := deployPane(t, 200, 20)
+	rs.nodes[nGuard].State = events.Succeeded
+	rs.nodes[nGoCheck].State = events.Running
+	rs.nodes[nGoCheck].Started = t0
+	p = p.withCells(rs.cells(t0))
+	before := ansi.Strip(p.View(rs, DefaultStyles(), t0))
+
+	tests := []struct {
+		id    string
+		label string
+	}{
+		{nGuard, "guard"},
+		{nGoCheck, "go-check"},
+		{nTofu, "tofu-apply"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			out := p.selectNode(tt.id).View(rs, DefaultStyles(), t0)
+			marked, reverse := markedText(out)
+			assert.Equal(t, []string{tt.label}, marked, "only the label text is marked")
+			assert.False(t, reverse, "no reverse video")
+			assert.Equal(t, before, ansi.Strip(out), "the selection does not move the layout")
+		})
+	}
 }
 
 func TestGraphViewRunningSpinner(t *testing.T) {
