@@ -78,7 +78,7 @@ expect_status() {
   [ "$1" = "$2" ] || fail "exit status $1, want $2"
 }
 
-latest_run() { find "$repo/testdata/workflows/.weft/runs/deploy" -mindepth 1 -maxdepth 1 -type d | sort | tail -1; }
+latest_run() { [ -d "$repo/testdata/workflows/.weft/runs/deploy" ] || return 0; find "$repo/testdata/workflows/.weft/runs/deploy" -mindepth 1 -maxdepth 1 -type d | sort | tail -1; }
 
 weft() { printf '%q ' env "$@"; }
 
@@ -163,7 +163,62 @@ scenario_plain_no_tty() {
   expect final "release    ✓ succeeded"
 }
 
-all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty)
+# Both stdout and stderr go into a pipe whose reader never reads, as with a
+# paused pager. Ctrl-C must still cancel on time and weft must exit.
+scenario_plain_stalled_output() {
+  local exitfile="$out/$scenario.exit" before
+  rm -f "$exitfile"
+  before=$(latest_run)
+  start 160 45 "{ trap '' INT; $(weft WEFT_FIXTURE_FLOOD=guard WEFT_FIXTURE_HANG=db-backup "$bin" run --ui=plain "$fixture") 2>&1; echo \$? > $exitfile; } | { trap '' INT; sleep 600; }"
+  local run="" i
+  for ((i = 0; i < 300; i++)); do
+    run=$(latest_run)
+    [ "$run" != "$before" ] && grep -q "db-backup: started" "$run/nodes/db-backup/1.log" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q "db-backup: started" "$run/nodes/db-backup/1.log" 2>/dev/null || {
+    fail "db-backup never started behind the stalled pipe"
+    return
+  }
+  local sent
+  sent=$(date +%s)
+  tm send-keys -t smoke C-c
+  for ((i = 0; i < 150; i++)); do
+    [ -s "$exitfile" ] && break
+    sleep 0.1
+  done
+  [ -s "$exitfile" ] || {
+    fail "weft did not exit within 15s of Ctrl-C with output stalled"
+    return
+  }
+  local took=$(($(date +%s) - sent))
+  expect_status "$(cat "$exitfile")" 1
+  [ "$took" -le 10 ] || fail "exit took ${took}s after Ctrl-C"
+  grep -q '"reason": "canceled"' "$run/nodes/db-backup/1.json" || fail "db-backup not recorded as canceled"
+  grep -q '"exit_code": 130' "$run/nodes/db-backup/1.json" || fail "db-backup did not finish its SIGINT cleanup"
+  [ "$(wc -l <"$run/nodes/guard/1.log")" -ge 200000 ] || fail "guard's node log lost output"
+  echo "exited ${took}s after Ctrl-C" >"$out/$scenario.final.txt"
+}
+
+# stdout closes early (head exits after one line). weft must finish the run
+# and exit with the run's own status, not die of SIGPIPE.
+scenario_plain_closed_stdout() {
+  local exitfile="$out/$scenario.exit"
+  rm -f "$exitfile"
+  start 160 45 "{ $(weft WEFT_FIXTURE_FAIL=deploy "$bin" run --ui=plain "$fixture") 2>/dev/null; echo \$? > $exitfile; } | head -n 1"
+  local status
+  status=$(wait_exit 30)
+  save final
+  expect_status "$status" 0
+  [ -s "$exitfile" ] || {
+    fail "no exit status written"
+    return
+  }
+  expect_status "$(cat "$exitfile")" 1
+  grep -q '"message":"run finished"' "$(latest_run)/weft.log" || fail "run did not finish after stdout closed"
+}
+
+all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty plain_stalled_output plain_closed_stdout)
 
 log "building weft into $out"
 (cd "$repo" && go build -o "$bin" .)

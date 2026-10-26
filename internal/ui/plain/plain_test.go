@@ -67,15 +67,22 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
-func TestSyncAfterStop(t *testing.T) {
+func TestRenderDropsAndBarrier(t *testing.T) {
 	wf, err := workflow.Parse([]byte("nodes:\n  a: {run: x}\n"))
 	require.NoError(t, err)
-	r := plain.New(&bytes.Buffer{}, wf, false)
-	ch := make(chan events.Event)
+	var out bytes.Buffer
+	r := plain.New(&out, wf, false)
+
+	bus := events.NewBus()
+	sub := bus.Subscribe(0)
 	done := make(chan struct{})
-	go func() { r.Run(ch); close(done) }()
-	r.Sync()
-	close(ch)
+	go func() { r.Run(sub.C); close(done) }()
+
+	bus.Publish(events.OutputDropped{Node: "a", Lines: 12})
+	assert.True(t, sub.Barrier(time.Second), "the renderer acknowledges barriers")
+	assert.Equal(t, "a … 12 output lines not shown: stdout fell behind (the node log has them)\n", out.String())
+
+	bus.Close()
 	<-done
-	r.Sync() // must not block once the renderer has stopped
+	assert.False(t, sub.Barrier(time.Second), "a finished subscription never reaches a barrier")
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/hay-kot/weft/internal/events"
@@ -24,13 +25,26 @@ const (
 
 // Renderer writes one line per output line and per notable state change.
 type Renderer struct {
-	out   io.Writer
-	width int
-	color bool
-	names map[string]string
+	out      *stickyWriter
+	width    int
+	color    bool
+	names    map[string]string
+	rendered atomic.Int64
+}
 
-	syncCh chan chan struct{}
-	done   chan struct{}
+// stickyWriter stops writing after the first error. Once stdout is a
+// closed pipe (`weft run | head` after head exits), every later write would
+// fail the same way, and the run itself must carry on regardless.
+type stickyWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (s *stickyWriter) Write(p []byte) (int, error) {
+	if s.err == nil {
+		_, s.err = s.w.Write(p)
+	}
+	return len(p), nil
 }
 
 // New returns a renderer for wf. color enables SGR styling of weft's own
@@ -43,40 +57,27 @@ func New(out io.Writer, wf *workflow.Workflow, color bool) *Renderer {
 		width = max(width, len(n.DisplayName()))
 	}
 	return &Renderer{
-		out:    out,
-		width:  width,
-		color:  color,
-		names:  names,
-		syncCh: make(chan chan struct{}),
-		done:   make(chan struct{}),
+		out:      &stickyWriter{w: out, err: nil},
+		width:    width,
+		color:    color,
+		names:    names,
+		rendered: atomic.Int64{},
 	}
 }
 
-// Run renders events until ch closes. Subscribe ch with no buffer so that
-// Sync covers every event published before it.
+// Run renders events until ch closes.
 func (r *Renderer) Run(ch <-chan events.Event) {
-	defer close(r.done)
-	for {
-		select {
-		case e, ok := <-ch:
-			if !ok {
-				return
-			}
-			r.Render(e)
-		case ack := <-r.syncCh:
-			close(ack)
-		}
+	for e := range ch {
+		r.Render(e)
+		r.rendered.Add(1)
 	}
 }
 
-// Sync returns once every event the renderer has received is written.
-func (r *Renderer) Sync() {
-	ack := make(chan struct{})
-	select {
-	case r.syncCh <- ack:
-		<-ack
-	case <-r.done:
-	}
+// Rendered returns how many events Run has finished rendering. It lets a
+// caller tell a renderer that is slowly catching up from one stuck on a
+// paused pipe.
+func (r *Renderer) Rendered() int64 {
+	return r.rendered.Load()
 }
 
 // Render writes the lines for one event.
@@ -86,6 +87,10 @@ func (r *Renderer) Render(e events.Event) {
 		r.line(e.Node, "│", "", lastSegment(e.Line))
 	case events.NodeChanged:
 		r.state(e)
+	case events.OutputDropped:
+		r.line(e.Node, "…", sgrYel, fmt.Sprintf("%d output lines not shown: stdout fell behind (the node log has them)", e.Lines))
+	case events.Barrier:
+		e.Done()
 	case events.RunStarted, events.RunFinished:
 	}
 }

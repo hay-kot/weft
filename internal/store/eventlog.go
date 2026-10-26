@@ -29,6 +29,10 @@ func EventType(e events.Event) string {
 		return "node_output"
 	case events.RunFinished:
 		return "run_finished"
+	case events.OutputDropped:
+		return "output_dropped"
+	case events.Barrier:
+		return "barrier"
 	default:
 		return fmt.Sprintf("%T", e)
 	}
@@ -51,8 +55,10 @@ func (r *Run) WriteEvents(ch <-chan events.Event) error {
 	var firstErr error
 	seq := 0
 	for e := range ch {
-		if _, ok := e.(events.NodeOutput); ok {
+		switch e.(type) {
+		case events.NodeOutput, events.Barrier:
 			continue
+		case events.RunStarted, events.NodeChanged, events.OutputDropped, events.RunFinished:
 		}
 		seq++
 		rec := EventRecord{Seq: seq, Time: time.Now(), Type: EventType(e), Event: e}

@@ -117,65 +117,111 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("open run log: %w", err)
 	}
 	defer func() { _ = logFile.Close() }()
-	runLog, err := cmd.runLogger(logFile, run)
+
+	// Nothing the engine waits on may write to stdout or stderr directly:
+	// either can be a paused pipe, and a blocked write must never delay a
+	// cancel. The renderer reads from its own bus queue, and notices and
+	// console logs go through an async writer.
+	stderr := newAsyncWriter(os.Stderr, 256)
+	runLog, err := cmd.runLogger(logFile, stderr, run)
 	if err != nil {
 		return err
 	}
 
 	stdoutTTY := runner.IsTerminal(os.Stdout)
 	color := stdoutTTY && !cmd.flags.NoColor
-	fmt.Fprintf(os.Stderr, "weft: run %s\nweft: run dir %s\n", run.ID, run.Dir)
+	_, _ = fmt.Fprintf(stderr, "weft: run %s\nweft: run dir %s\n", run.ID, run.Dir)
 
 	bus := events.NewBus()
 	var wg sync.WaitGroup
-	eventsCh := bus.Subscribe(256)
+	eventSub := bus.Subscribe(0)
 	wg.Go(func() {
-		if err := run.WriteEvents(eventsCh); err != nil {
+		if err := run.WriteEvents(eventSub.C); err != nil {
 			runLog.Error().Err(err).Msg("write event log")
 		}
 	})
 	renderer := plain.New(os.Stdout, wf, color)
-	renderCh := bus.Subscribe(0)
-	wg.Go(func() { renderer.Run(renderCh) })
+	renderSub := bus.Subscribe(0)
+	wg.Go(func() { renderer.Run(renderSub.C) })
 
 	eng := engine.New(engine.Options{
 		Workflow:    wf,
 		Run:         run,
 		Runner:      runner.Process{},
-		Lender:      plain.Lender{Renderer: renderer},
+		Lender:      plain.Lender{Sub: renderSub},
 		Bus:         bus,
 		Concurrency: cmd.concurrency,
 		Env:         nodeEnv(stdoutTTY),
 		Log:         runLog,
 	})
 
-	stopSignals := handleSignals(eng, runLog)
+	sigs := handleSignals(eng, stderr, runLog)
+	defer sigs.stop()
 	summary := eng.Run(ctx)
-	stopSignals()
+	sigs.runEnded()
 	bus.Close()
-	wg.Wait()
+
+	// Let the renderer and the event log catch up. With stdout paused that
+	// could take forever, so give up once the renderer stops making
+	// progress, or at once on a signal. The node logs on disk are complete
+	// either way.
+	drained := make(chan struct{})
+	go func() { wg.Wait(); close(drained) }()
+	if !waitForOutput(drained, renderer.Rendered, outputStallTimeout, sigs.abort) {
+		runLog.Warn().Msg("stdout is not being read; exiting without flushing the rest of the output")
+	}
 
 	counts := summarize(summary)
 	outcome := "succeeded"
 	if !summary.Success {
 		outcome = "failed"
 	}
-	fmt.Fprintf(os.Stderr, "weft: run %s %s (%s)\nweft: run dir %s\n", run.ID, outcome, counts, run.Dir)
+	_, _ = fmt.Fprintf(stderr, "weft: run %s %s (%s)\nweft: run dir %s\n", run.ID, outcome, counts, run.Dir)
+	stderr.Close(noticeFlushTimeout, sigs.abort)
 	if !summary.Success {
 		return fmt.Errorf("run %s failed (%s); logs in %s", run.ID, counts, run.Dir)
 	}
 	return nil
 }
 
+// outputStallTimeout is how long weft waits at exit for a renderer that has
+// stopped making progress.
+const outputStallTimeout = 3 * time.Second
+
+// noticeFlushTimeout bounds the wait for weft's last stderr lines.
+const noticeFlushTimeout = time.Second
+
+// waitForOutput waits for done while progress keeps moving. It returns false
+// when progress stalls for stall or abort closes first.
+func waitForOutput(done <-chan struct{}, progress func() int64, stall time.Duration, abort <-chan struct{}) bool {
+	tick := time.NewTicker(stall / 10)
+	defer tick.Stop()
+	last, since := progress(), time.Now()
+	for {
+		select {
+		case <-done:
+			return true
+		case <-abort:
+			return false
+		case <-tick.C:
+			if p := progress(); p != last {
+				last, since = p, time.Now()
+			} else if time.Since(since) >= stall {
+				return false
+			}
+		}
+	}
+}
+
 // runLogger returns a logger that writes JSON to the run's weft.log at the
 // configured level and warnings and errors to stderr. Progress already
 // reaches stderr through the renderer, so info lines there would repeat it.
-func (cmd *RunCmd) runLogger(file io.Writer, run *store.Run) (zerolog.Logger, error) {
+func (cmd *RunCmd) runLogger(file, stderr io.Writer, run *store.Run) (zerolog.Logger, error) {
 	level, err := zerolog.ParseLevel(cmd.flags.LogLevel)
 	if err != nil {
 		return zerolog.Nop(), fmt.Errorf("parse log level: %w", err)
 	}
-	console := zerolog.ConsoleWriter{Out: os.Stderr, NoColor: cmd.flags.NoColor}
+	console := zerolog.ConsoleWriter{Out: stderr, NoColor: cmd.flags.NoColor}
 	out := zerolog.MultiLevelWriter(
 		levelWriter{w: file, min: level},
 		levelWriter{w: console, min: max(level, zerolog.WarnLevel)},
@@ -210,36 +256,63 @@ func nodeEnv(tty bool) []string {
 	return env
 }
 
-// handleSignals turns the first SIGINT or SIGTERM into a graceful cancel and
-// the second into a kill. It returns a function that stops handling.
-func handleSignals(eng *engine.Engine, l zerolog.Logger) func() {
+type signalHandler struct {
+	// abort closes on the first signal after the run ends.
+	abort    chan struct{}
+	ended    chan struct{}
+	stopOnce sync.Once
+	stop     func()
+}
+
+func (h *signalHandler) runEnded() { close(h.ended) }
+
+// handleSignals turns the first SIGINT or SIGTERM into a graceful cancel
+// and the second into a kill. A signal after the run ends closes abort. The
+// engine is told first and the notice printed after, so a stuck stderr can't
+// hold up the cancel.
+func handleSignals(eng *engine.Engine, notices io.Writer, l zerolog.Logger) *signalHandler {
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	done := make(chan struct{})
+	h := &signalHandler{
+		abort:    make(chan struct{}),
+		ended:    make(chan struct{}),
+		stopOnce: sync.Once{},
+		stop:     nil,
+	}
+	h.stop = func() {
+		h.stopOnce.Do(func() {
+			signal.Stop(ch)
+			close(done)
+		})
+	}
 	go func() {
 		count := 0
 		for {
 			select {
 			case sig := <-ch:
+				select {
+				case <-h.ended:
+					close(h.abort)
+					return
+				default:
+				}
 				count++
 				if count == 1 {
-					l.Info().Str("signal", sig.String()).Msg("signal received; canceling run")
-					fmt.Fprintln(os.Stderr, "weft: canceling; running nodes get SIGINT and a grace period. Press Ctrl-C again to kill them now.")
 					eng.Cancel()
+					l.Info().Str("signal", sig.String()).Msg("signal received; canceling run")
+					_, _ = fmt.Fprintln(notices, "weft: canceling; running nodes get SIGINT and a grace period. Press Ctrl-C again to kill them now.")
 					continue
 				}
-				l.Warn().Str("signal", sig.String()).Msg("second signal received; killing nodes")
-				fmt.Fprintln(os.Stderr, "weft: killing running nodes")
 				eng.Kill()
+				l.Warn().Str("signal", sig.String()).Msg("second signal received; killing nodes")
+				_, _ = fmt.Fprintln(notices, "weft: killing running nodes")
 			case <-done:
 				return
 			}
 		}
 	}()
-	return func() {
-		signal.Stop(ch)
-		close(done)
-	}
+	return h
 }
 
 func summarize(s engine.Summary) string {

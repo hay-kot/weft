@@ -212,10 +212,10 @@ func newHarness(t *testing.T, yml string, b map[string]behavior, concurrency int
 		done:     make(chan struct{}),
 	}
 	bus := events.NewBus()
-	ch := bus.Subscribe(1024)
+	sub := bus.Subscribe(-1)
 	go func() {
 		defer close(h.done)
-		for e := range ch {
+		for e := range sub.C {
 			h.events = append(h.events, e)
 		}
 	}()

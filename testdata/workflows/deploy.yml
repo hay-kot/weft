@@ -4,6 +4,7 @@
 # Knobs (comma-separated node IDs):
 #   WEFT_FIXTURE_FAIL  nodes that exit 1
 #   WEFT_FIXTURE_HANG  nodes that keep running until canceled
+#   WEFT_FIXTURE_FLOOD nodes that print about 10 MB before finishing
 concurrency: 4
 nodes:
   guard:

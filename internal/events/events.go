@@ -3,7 +3,6 @@
 package events
 
 import (
-	"sync"
 	"time"
 )
 
@@ -33,7 +32,8 @@ func (s State) Terminal() bool {
 	}
 }
 
-// Event is one of RunStarted, NodeChanged, NodeOutput, or RunFinished.
+// Event is one of RunStarted, NodeChanged, NodeOutput, OutputDropped,
+// RunFinished, or Barrier.
 //
 //sumtype:decl
 type Event interface {
@@ -82,60 +82,33 @@ type RunFinished struct {
 	At      time.Time `json:"at"`
 }
 
-func (RunStarted) isEvent()  {}
-func (NodeChanged) isEvent() {}
-func (NodeOutput) isEvent()  {}
-func (RunFinished) isEvent() {}
-
-// Bus fans events out to every subscriber. Publish blocks until each
-// subscriber's buffer has room, so a slow subscriber applies back-pressure
-// instead of losing events.
-type Bus struct {
-	mu     sync.Mutex
-	subs   []chan Event
-	closed bool
+// OutputDropped reports output lines a subscriber never saw because it fell
+// behind (for example, stdout is a paused pipe). The per-attempt log files
+// are written directly by the engine and still hold every line.
+type OutputDropped struct {
+	Node  string `json:"node"`
+	Lines int    `json:"lines"`
 }
 
-// NewBus returns an empty bus.
-func NewBus() *Bus {
-	return &Bus{mu: sync.Mutex{}, subs: nil, closed: false}
+// Barrier is delivered to one subscriber after every event published before
+// it. The subscriber calls Done once it has handled those events. It never
+// reaches other subscribers and carries no run data.
+type Barrier struct {
+	done chan struct{}
 }
 
-// Subscribe returns a channel that receives every event published after the
-// call. The channel closes when the bus closes.
-func (b *Bus) Subscribe(buffer int) <-chan Event {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	ch := make(chan Event, buffer)
-	if b.closed {
-		close(ch)
-		return ch
-	}
-	b.subs = append(b.subs, ch)
-	return ch
-}
-
-// Publish delivers e to every subscriber. Publishing after Close is a no-op.
-func (b *Bus) Publish(e Event) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return
-	}
-	for _, ch := range b.subs {
-		ch <- e
+// Done marks the barrier reached. It is safe to call more than once.
+func (b Barrier) Done() {
+	select {
+	case <-b.done:
+	default:
+		close(b.done)
 	}
 }
 
-// Close closes every subscriber channel.
-func (b *Bus) Close() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return
-	}
-	b.closed = true
-	for _, ch := range b.subs {
-		close(ch)
-	}
-}
+func (RunStarted) isEvent()    {}
+func (NodeChanged) isEvent()   {}
+func (NodeOutput) isEvent()    {}
+func (RunFinished) isEvent()   {}
+func (OutputDropped) isEvent() {}
+func (Barrier) isEvent()       {}

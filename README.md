@@ -85,6 +85,11 @@ Every node also gets `WEFT_WORKFLOW`, `WEFT_ROOT`, `WEFT_RUN_ID`,
   so `mise` and whatever it started get the signal together. A second Ctrl-C
   sends SIGKILL at once. Ctrl-C while an interactive node runs goes to that
   node, and weft then cancels the rest of the run.
+- Output to a pipe never slows the run down. If stdout is a pager you
+  paused, or a reader that stopped, weft keeps scheduling and canceling on
+  time and skips lines the reader can't take (it says how many). The node
+  logs on disk always have everything. weft also keeps going when stdout
+  closes early, as with `weft run deploy | head`.
 
 ## Commands
 
@@ -135,5 +140,6 @@ mise run smoke   # run the binary against the stub fixture in a private tmux ser
 `testdata/workflows/deploy.yml` is a stub with the shape of a real
 release-and-deploy pipeline. Its commands are scripts under
 `testdata/workflows/bin/` that only sleep and print. Set
-`WEFT_FIXTURE_FAIL=deploy` to make a node fail, or `WEFT_FIXTURE_HANG=db-backup`
-to make one run until canceled.
+`WEFT_FIXTURE_FAIL=deploy` to make a node fail, `WEFT_FIXTURE_HANG=db-backup`
+to make one run until canceled, or `WEFT_FIXTURE_FLOOD=guard` to make one
+print about 10 MB.

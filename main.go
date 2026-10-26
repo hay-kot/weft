@@ -144,6 +144,12 @@ func run() int {
 	app = commands.NewGraphCmd(flags).Register(app)
 	// +scaffold:command:register
 
+	// Without a handler, Go exits on SIGPIPE when stdout or stderr is a
+	// closed pipe, which would orphan running nodes mid-deploy. Handling it
+	// (rather than ignoring it) turns such writes into EPIPE errors while
+	// children still start with default SIGPIPE behavior.
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -156,11 +162,22 @@ func run() int {
 			colorGray = ""
 			colorReset = ""
 		}
-		fmt.Fprintf(os.Stderr, "\n%s╭ Error%s\n%s│%s %s%s%s\n%s╵%s\n",
+		msg := fmt.Sprintf("\n%s╭ Error%s\n%s│%s %s%s%s\n%s╵%s\n",
 			colorRed, colorReset,
 			colorRed, colorReset, colorGray, err.Error(), colorReset,
 			colorRed, colorReset,
 		)
+		// stderr may be a paused pipe; exiting with the right status matters
+		// more than this message.
+		written := make(chan struct{})
+		go func() {
+			_, _ = os.Stderr.WriteString(msg)
+			close(written)
+		}()
+		select {
+		case <-written:
+		case <-time.After(time.Second):
+		}
 		return 1
 	}
 
