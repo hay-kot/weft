@@ -1,0 +1,120 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - containedctx
+    - contextcheck
+    - depguard
+    - dogsled
+    - durationcheck
+    - embeddedstructfieldcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exhaustruct_v5
+    - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
+    - gochecknoinits
+    - gochecksumtype
+    - goconst
+    - gocritic
+    - gocyclo
+    - goprintffuncname
+    - gosec
+    - govet
+    - ineffassign
+    - makezero
+    - mirror
+    - misspell
+    - modernize
+    - musttag
+    - nakedret
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - predeclared
+    - reassign
+    - recvcheck
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - tagalign
+    - testifylint
+    - thelper
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+    - zerologlint
+  settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: io/ioutil
+              desc: |
+                Deprecated: As of Go 1.16, the same functionality is now provided by
+                package io or package os, and those implementations should be
+                preferred in new code. See the specific function documentation for
+                details.
+            - pkg: github.com/pkg/errors
+              desc: Use the standard library errors package.
+    exhaustive:
+      default-signifies-exhaustive: true
+    exhaustruct_v5:
+      explicit-mode: true
+      enforce-patterns:
+        - '^github.com/hay-kot/weft.*\.'
+      optional-patterns:
+        - '.*/commands\.Flags$'
+    goconst:
+      min-len: 5
+      min-occurrences: 5
+    revive:
+      confidence: 3
+      severity: warning
+    tagalign:
+      order:
+        - json
+        - schema
+        - yaml
+        - yml
+        - toml
+        - validate
+    testifylint:
+      enable-all: true
+  exclusions:
+    generated: lax
+    warn-unused: true
+issues:
+  fix: false
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    warn-unused: true
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+    goimports:
+      local-prefixes:
+        - "github.com/hay-kot/weft"
