@@ -77,7 +77,9 @@ plain mode).
 
 Ctrl-C cancels the run: running nodes get SIGINT and their kill_timeout
 grace period, then SIGTERM, then SIGKILL. A second Ctrl-C sends SIGKILL at
-once. SIGTERM and SIGHUP cancel the same way.
+once. SIGTERM and SIGHUP cancel the same way. In the TUI, x cancels only
+the selected node, the same way, and a second x kills it. Nodes that need
+it are blocked, and the rest of the run goes on.
 
 --resume carries on the latest run in its own directory: nodes that
 succeeded are skipped, and the rest run again as a new attempt. --from
@@ -398,8 +400,10 @@ func (r *runSession) tui(ctx context.Context, confirm string) (summary engine.Su
 		Confirm:   confirm,
 		Start:     func() { startOnce.Do(func() { close(start) }) },
 		Rerun:     r.rerun,
-		Notice:    r.notice,
-		Log:       r.log,
+		// The engine is created after the TUI, which lends it the terminal.
+		CancelNode: func(id string) (plan.CancelAction, error) { return r.eng.CancelNode(id) },
+		Notice:     r.notice,
+		Log:        r.log,
 	}, r.bus.Subscribe(0), r.cmd.flags.NoColor)
 	eng := r.engine(app.Lender(), true, true)
 	if confirm == "" {

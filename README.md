@@ -110,13 +110,14 @@ graph live, with the selected node's output under it:
  › release  ● running  1:31  mise run release
  • building binaries  layout=dist
 ───────────────────────────────────────────────────────────────────────────────────────────
- hjkl select • enter log • ctrl+c cancel • q quit • ? help • f follow • v layout
+ hjkl select • enter log • ctrl+c cancel • q quit • ? help • r rerun • R rerun+downstream
 ```
 
 Icons: `○` pending, a spinner for running, `◆` waiting for the terminal,
 `✓` succeeded (dim when skipped by a resume), `✗` failed, `⊘` blocked or
 canceled, `·` excluded by `--from` or `--only`.
 
+The selected node's label is bold and underlined, and its edges are bold.
 The selection follows the run (the node that just started, or the first
 failure) until you move it. Keys:
 
@@ -127,6 +128,7 @@ failure) until you move it. Keys:
 | `pgup` `pgdn`, `ctrl+u` `ctrl+d` | Scroll the log; `g` and `G` jump to the top and bottom |
 | `r` | Rerun the selected node, if its needs are satisfied |
 | `R` | Rerun the selected node and everything downstream of it |
+| `x` | Cancel the selected node: SIGINT and its `kill_timeout` if it runs, again to kill it. Nodes that need it are blocked; the rest of the run goes on |
 | `f` | Pause or resume following the log's newest lines |
 | `v` | Switch between the horizontal and vertical graph |
 | `ctrl+c` | Cancel the run; again to kill the running nodes |

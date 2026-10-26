@@ -4,7 +4,8 @@
 // A run is one or more passes. The first pass starts with Run; each pass
 // ends when no node is running or can start, with a RunFinished event. An
 // engine with Options.Reruns then waits for Rerun, which starts another
-// pass, until Close. Rerun during a pass adds to that pass.
+// pass, until Close. Rerun during a pass adds to that pass. CancelNode
+// stops one node of a pass and leaves the rest of it running.
 package engine
 
 import (
@@ -100,6 +101,9 @@ type nodeRun struct {
 	pgid   int
 	cancel context.CancelFunc
 	kill   chan struct{}
+	// stopping is set once the running attempt was asked to stop, by
+	// CancelNode or by a cancel of the pass.
+	stopping bool
 }
 
 type finished struct {
@@ -120,6 +124,16 @@ type rerunRequest struct {
 	reply      chan error
 }
 
+type cancelRequest struct {
+	id    string
+	reply chan cancelReply
+}
+
+type cancelReply struct {
+	action plan.CancelAction
+	err    error
+}
+
 // Engine runs one workflow.
 type Engine struct {
 	opts        Options
@@ -132,6 +146,7 @@ type Engine struct {
 	results  chan finished
 	procs    chan startedProc
 	requests chan rerunRequest
+	cancels  chan cancelRequest
 	runDone  chan struct{}
 
 	closeOnce sync.Once
@@ -163,7 +178,7 @@ func New(opts Options) *Engine {
 		nr := &nodeRun{
 			node: n, state: pn.State, attempt: pn.Attempt,
 			started: time.Time{}, finished: time.Time{}, exitCode: 0, reason: "", errText: "", log: "", pgid: 0,
-			cancel: nil, kill: nil,
+			cancel: nil, kill: nil, stopping: false,
 		}
 		switch pn.State {
 		case events.Skipped, events.Excluded:
@@ -185,6 +200,7 @@ func New(opts Options) *Engine {
 		results:     make(chan finished),
 		procs:       make(chan startedProc),
 		requests:    make(chan rerunRequest),
+		cancels:     make(chan cancelRequest),
 		runDone:     make(chan struct{}),
 		closeOnce:   sync.Once{},
 		closeCh:     make(chan struct{}),
@@ -303,6 +319,23 @@ func (e *Engine) Rerun(id string, downstream bool, start store.Start) error {
 	return <-req.reply
 }
 
+// CancelNode stops one node and leaves the rest of the pass running. A
+// node that has not started is marked canceled; a running one gets the
+// SIGINT, kill_timeout, SIGTERM, SIGKILL shutdown, and a second CancelNode
+// of the same attempt sends SIGKILL at once. Nodes that need it then block
+// as for any canceled need. plan.Cancel decides what applies; CancelNode
+// returns what it did, or ErrClosed once Run has returned.
+func (e *Engine) CancelNode(id string) (plan.CancelAction, error) {
+	req := cancelRequest{id: id, reply: make(chan cancelReply, 1)}
+	select {
+	case e.cancels <- req:
+	case <-e.runDone:
+		return 0, ErrClosed
+	}
+	r := <-req.reply
+	return r.action, r.err
+}
+
 // Run executes the workflow and returns when every node has reached a
 // terminal state, or with Options.Reruns, once the engine is closed and
 // idle. Canceling ctx cancels the current pass and stops reruns.
@@ -352,6 +385,8 @@ func (e *Engine) idle(ctx context.Context) bool {
 				e.persist()
 				return true
 			}
+		case req := <-e.cancels:
+			req.reply <- e.applyCancel(req.id)
 		case <-e.closeCh:
 			return false
 		case <-ctx.Done():
@@ -376,6 +411,7 @@ func (e *Engine) runPass(ctx context.Context) {
 			e.log.Info().Int("running", running).Msg("cancel requested; sending SIGINT to running nodes")
 			for _, nr := range e.ordered() {
 				if nr.state == events.Running {
+					nr.stopping = true
 					nr.cancel()
 				}
 			}
@@ -404,6 +440,8 @@ func (e *Engine) runPass(ctx context.Context) {
 			}
 		case req := <-e.requests:
 			req.reply <- e.applyRerun(req, canceling)
+		case req := <-e.cancels:
+			req.reply <- e.applyCancel(req.id)
 		case <-ctxDone:
 		case <-cancelCh:
 		case <-killCh:
@@ -411,7 +449,7 @@ func (e *Engine) runPass(ctx context.Context) {
 			e.log.Warn().Int("running", running).Msg("kill requested; sending SIGKILL to running nodes")
 			for _, nr := range e.ordered() {
 				if nr.state == events.Running {
-					close(nr.kill)
+					killNode(nr)
 				}
 			}
 		}
@@ -445,6 +483,46 @@ func (e *Engine) applyRerun(req rerunRequest, canceling bool) error {
 		e.state.History = append(e.state.History, req.start)
 	}
 	return nil
+}
+
+// applyCancel stops the node of a CancelNode request. The next scheduling
+// step blocks whatever needs a node it canceled before start.
+func (e *Engine) applyCancel(id string) cancelReply {
+	states := make(map[string]events.State, len(e.nodes))
+	for nid, nr := range e.nodes {
+		states[nid] = nr.state
+	}
+	stopping := false
+	if nr := e.nodes[id]; nr != nil {
+		stopping = nr.stopping
+	}
+	action, err := plan.Cancel(e.opts.Workflow, states, id, stopping)
+	if err != nil {
+		e.log.Info().Str("node", id).Err(err).Msg("node cancel refused")
+		return cancelReply{action: 0, err: err}
+	}
+	nr := e.nodes[id]
+	log := e.nodeLog(nr)
+	log.Info().Str("state", string(nr.state)).Stringer("action", action).Msg("node cancel requested")
+	switch action {
+	case plan.CancelUnstarted:
+		e.cancelBeforeStart(nr)
+	case plan.CancelRunning:
+		nr.stopping = true
+		nr.cancel()
+	case plan.KillRunning:
+		killNode(nr)
+	}
+	return cancelReply{action: action, err: nil}
+}
+
+// killNode skips the rest of a running node's grace period. A node can be
+// killed by CancelNode and by a kill of the pass, so this runs more than
+// once per attempt.
+func killNode(nr *nodeRun) {
+	if !isClosed(nr.kill) {
+		close(nr.kill)
+	}
 }
 
 func isClosed(ch <-chan struct{}) bool {
@@ -579,13 +657,17 @@ func (e *Engine) cancelUnstarted() {
 	for _, nr := range e.ordered() {
 		switch nr.state {
 		case events.Pending, events.Ready, events.Waiting:
-			e.log.Debug().Str("node", nr.node.ID).Str("from", string(nr.state)).Msg("node canceled before start")
-			nr.state = events.Canceled
-			nr.finished = time.Now()
-			e.end(nr, runner.Result{ExitCode: -1, Signal: "", Reason: runner.ReasonCanceled, Err: nil}, "canceled before start", "")
+			e.cancelBeforeStart(nr)
 		default:
 		}
 	}
+}
+
+func (e *Engine) cancelBeforeStart(nr *nodeRun) {
+	e.log.Debug().Str("node", nr.node.ID).Str("from", string(nr.state)).Msg("node canceled before start")
+	nr.state = events.Canceled
+	nr.finished = time.Now()
+	e.end(nr, runner.Result{ExitCode: -1, Signal: "", Reason: runner.ReasonCanceled, Err: nil}, "canceled before start", "")
 }
 
 func (e *Engine) block(nr *nodeRun, why string) {
@@ -606,6 +688,7 @@ func (e *Engine) start(ctx context.Context, nr *nodeRun) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	nr.cancel = cancel
 	nr.kill = make(chan struct{})
+	nr.stopping = false
 	nr.state = events.Running
 	nr.started = time.Now()
 	nr.log = e.opts.Run.RelPath(e.opts.Run.AttemptLogPath(nr.node.ID, nr.attempt))

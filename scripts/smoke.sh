@@ -148,6 +148,23 @@ expect_status() {
   [ "$1" = "$2" ] || fail "exit status $1, want $2"
 }
 
+# log_has <file> <part...>: one line of the file holds every part.
+log_has() {
+  local file=$1
+  shift
+  awk -v n=$# 'BEGIN { for (i = 1; i < ARGC; i++) { want[i] = ARGV[i]; delete ARGV[i] } }
+    { ok = 1; for (i = 1; i <= n; i++) if (index($0, want[i]) == 0) ok = 0; if (ok) { found = 1; exit } }
+    END { exit !found }' "$@" <"$file"
+}
+
+# no_sigterm <run> <node>: weft never sent the node SIGTERM, so it ended
+# within its kill_timeout.
+no_sigterm() {
+  if log_has "$1/weft.log" "\"node\":\"$2\"" '"signal":"terminated"' "signal sent to process group"; then
+    fail "weft sent $2 SIGTERM"
+  fi
+}
+
 latest_run() { [ -d "$repo/testdata/workflows/.weft/runs/deploy" ] || return 0; find "$repo/testdata/workflows/.weft/runs/deploy" -mindepth 1 -maxdepth 1 -type d | sort | tail -1; }
 
 weft() { printf '%q ' env "$@"; }
@@ -198,6 +215,7 @@ scenario_plain_cancel() {
   expect final "release    ⊘ canceled before start"
   grep -q '"signal":"interrupt".*signal sent to process group' "$(latest_run)/weft.log" ||
     fail "weft.log has no SIGINT sent to a process group"
+  no_sigterm "$(latest_run)" db-backup
 }
 
 scenario_plain_kill() {
@@ -413,6 +431,77 @@ scenario_tui_cancel() {
   grep -q "db-backup: lock released, exiting" "$run/nodes/db-backup/1.log" || fail "db-backup did not get its grace period"
   grep -q '"state": "canceled"' "$run/nodes/release/1.json" || fail "release not recorded as canceled"
   grep -q '"signal":"interrupt".*signal sent to process group' "$run/weft.log" || fail "weft.log has no SIGINT sent to a process group"
+  no_sigterm "$run" db-backup
+}
+
+# wait_hanging <run> <attempt>: go-check and db-backup are both running
+# and waiting to be canceled.
+wait_hanging() {
+  local i
+  for ((i = 0; i < 150; i++)); do
+    grep -q "hanging until canceled" "$1/nodes/go-check/1.log" 2>/dev/null &&
+      grep -q "db-backup: started" "$1/nodes/db-backup/$2.log" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  fail "go-check and db-backup attempt $2 never both ran"
+  return 1
+}
+
+# x cancels only the selected node: db-backup gets its SIGINT grace period
+# and releases its lock while go-check keeps running. A rerun of it and a
+# double x then kills it at once.
+scenario_tui_node_cancel() {
+  start 160 45 "$(tui WEFT_FIXTURE_HANG=go-check,db-backup WEFT_LOG_LEVEL=debug --)"
+  wait_screen "ui-check" || return
+  local run
+  run=$(latest_run)
+  wait_hanging "$run" 1 || return
+  # guard, then the middle of the fan-out, then the node under it.
+  tm send-keys -t smoke h h l j
+  wait_screen "› db-backup" 5 || return
+
+  tm send-keys -t smoke x
+  wait_screen "canceling db-backup: it got SIGINT and has its kill_timeout (10s) to stop" 5 || return
+  save_screen canceling
+  check_frame canceling 160 45
+  wait_screen "db-backup canceled (exit code 130)" 10 || return
+  wait_screen "⊘ release" 5 || return
+  save_screen node_canceled
+  check_frame node_canceled 160 45
+  expect node_canceled "deploy  running"
+  grep -q "db-backup: lock released, exiting" "$run/nodes/db-backup/1.log" || fail "db-backup did not get its grace period"
+  grep -q '"reason": "canceled"' "$run/nodes/db-backup/1.json" || fail "db-backup attempt 1 not recorded as canceled"
+  log_has "$run/weft.log" '"message":"node cancel requested"' '"node":"db-backup"' '"attempt":1' '"action":"cancel_running"' ||
+    fail "weft.log lacks the cancel request"
+  log_has "$run/weft.log" '"node":"db-backup"' '"attempt":1' '"signal":"interrupt"' "signal sent to process group" ||
+    fail "weft.log lacks the SIGINT to db-backup"
+  no_sigterm "$run" db-backup
+  grep -q "hanging until canceled" "$run/nodes/go-check/1.log" && [ ! -f "$run/nodes/go-check/1.json" ] ||
+    fail "go-check stopped with db-backup"
+
+  tm send-keys -t smoke x
+  wait_screen "can't cancel db-backup: it is canceled" 5 || return
+
+  tm send-keys -t smoke r
+  wait_hanging "$run" 2 || return
+  tm send-keys -t smoke x
+  sleep 0.3
+  tm send-keys -t smoke x
+  # The kill notice gives way to the outcome as soon as the node is gone.
+  wait_screen "db-backup canceled (killed)" 5 || return
+  save_screen node_killed
+  log_has "$run/weft.log" '"node":"db-backup"' '"attempt":2' '"signal":"killed"' "signal sent to process group" ||
+    fail "weft.log lacks the SIGKILL to db-backup attempt 2"
+  if grep -q "lock released" "$run/nodes/db-backup/2.log"; then fail "the second x waited for the grace period"; fi
+
+  tm send-keys -t smoke k k
+  wait_screen "› go-check" 5 || return
+  tm send-keys -t smoke x
+  wait_screen "⊘ go-check" 10 || return
+  save_screen finished
+  check_frame finished 160 45
+  quit_and_check 1
+  grep -q '"message":"run finished"' "$run/weft.log" || fail "weft.log lacks run finished"
 }
 
 scenario_tui_kill() {
@@ -614,7 +703,7 @@ scenario_tui_no_tty() {
 
 all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty plain_stalled_output plain_closed_stdout graph_wide graph_narrow graph_forced_horizontal
   tui_success tui_narrow_fail tui_resize tui_cancel tui_kill tui_quit_confirm tui_exit_on_end
-  tui_interactive_cancel tui_flood tui_no_tty plain_resume plain_only tui_resume tui_rerun)
+  tui_interactive_cancel tui_flood tui_no_tty plain_resume plain_only tui_resume tui_rerun tui_node_cancel)
 
 log "building weft into $out"
 (cd "$repo" && go build -o "$bin" .)

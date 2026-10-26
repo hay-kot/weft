@@ -48,6 +48,9 @@ type Options struct {
 	// downstream is set. Unless force is set it may return a
 	// *plan.DriftError, and the TUI asks before calling it again with force.
 	Rerun func(id string, downstream, force bool) error
+	// CancelNode cancels one node and leaves the rest of the run going. It
+	// returns what it did; plan.Cancel describes the cases.
+	CancelNode func(id string) (plan.CancelAction, error)
 	// Notice is shown in the footer at the start, for example to say that
 	// the run resumes an earlier one.
 	Notice string
@@ -96,6 +99,12 @@ type (
 		downstream bool
 		err        error
 	}
+	// cancelNodeDoneMsg reports how a node cancel request went.
+	cancelNodeDoneMsg struct {
+		node   string
+		action plan.CancelAction
+		err    error
+	}
 )
 
 // askKind is what a footer question is about.
@@ -142,6 +151,10 @@ type Model struct {
 	cancelLevel  int
 	ask          question
 	quitAfterRun bool
+	// stopping is the node whose cancel the footer is showing. When that
+	// node ends with the notice still up, the notice says how it ended.
+	stopping       string
+	stoppingNotice string
 	// ticking is set while a tick is scheduled, so a pass that starts
 	// after the clock stopped restarts it exactly once.
 	ticking bool
@@ -159,24 +172,26 @@ func New(opts Options) Model {
 		f = f.withNotice(noticeWarn, opts.Confirm)
 	}
 	return Model{
-		opts:         opts,
-		keys:         DefaultKeyMap(),
-		styles:       styles,
-		rs:           rs,
-		now:          time.Time{},
-		width:        0,
-		height:       0,
-		header:       header{width: 0},
-		graph:        g,
-		pane:         newLogPane(g.selected),
-		view:         newLogView(g.selected),
-		footer:       f,
-		viewOpen:     false,
-		auto:         true,
-		cancelLevel:  0,
-		ask:          ask,
-		quitAfterRun: false,
-		ticking:      true,
+		opts:           opts,
+		keys:           DefaultKeyMap(),
+		styles:         styles,
+		rs:             rs,
+		now:            time.Time{},
+		width:          0,
+		height:         0,
+		header:         header{width: 0},
+		graph:          g,
+		pane:           newLogPane(g.selected),
+		view:           newLogView(g.selected),
+		footer:         f,
+		viewOpen:       false,
+		auto:           true,
+		cancelLevel:    0,
+		ask:            ask,
+		quitAfterRun:   false,
+		stopping:       "",
+		stoppingNotice: "",
+		ticking:        true,
 	}
 }
 
@@ -215,6 +230,8 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.interrupted(msg)
 	case rerunDoneMsg:
 		return m.rerunDone(msg), nil
+	case cancelNodeDoneMsg:
+		return m.cancelNodeDone(msg), nil
 	case lendMsg:
 		return m, m.lend(msg)
 	case lendDoneMsg:
@@ -283,6 +300,12 @@ func (m Model) nodeChanged(e events.NodeChanged) Model {
 	}
 	st.State, st.Attempt, st.ExitCode = e.State, e.Attempt, e.ExitCode
 	st.Err, st.Reason, st.Started, st.Finished = e.Err, e.Reason, e.Started, e.Finished
+	if e.Node == m.stopping && e.State.Terminal() {
+		if m.footer.notice == m.stoppingNotice {
+			m.footer = m.footer.withNotice(noticeInfo, m.displayName(e.Node)+" "+e.Err)
+		}
+		m.stopping, m.stoppingNotice = "", ""
+	}
 	if m.auto {
 		m = m.selectNode(m.rs.autoSelect(m.graph.selected, e.Node))
 	}
@@ -381,6 +404,8 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch {
 	case key.Matches(k, m.keys.Rerun), key.Matches(k, m.keys.RerunAll):
 		return m.requestRerun(m.graph.selected, key.Matches(k, m.keys.RerunAll))
+	case key.Matches(k, m.keys.CancelNode):
+		return m.requestCancelNode(m.graph.selected)
 	case key.Matches(k, m.keys.Quit):
 		if m.rs.done {
 			return m, tea.Quit
@@ -491,6 +516,48 @@ func (m Model) rerunDone(msg rerunDoneMsg) Model {
 	return m
 }
 
+// requestCancelNode checks that id may be canceled before asking for it,
+// so a finished node gets its reason at once. The engine checks again,
+// and decides whether a running node is canceled or killed.
+func (m Model) requestCancelNode(id string) (Model, tea.Cmd) {
+	if id == "" || m.opts.CancelNode == nil {
+		return m, nil
+	}
+	if _, err := plan.Cancel(m.rs.wf, m.rs.states(), id, false); err != nil {
+		m.footer = m.footer.withNotice(noticeWarn, err.Error())
+		return m, nil
+	}
+	fn := m.opts.CancelNode
+	return m, func() tea.Msg {
+		action, err := fn(id)
+		return cancelNodeDoneMsg{node: id, action: action, err: err}
+	}
+}
+
+func (m Model) cancelNodeDone(msg cancelNodeDoneMsg) Model {
+	name := m.displayName(msg.node)
+	if msg.err != nil {
+		m.footer = m.footer.withNotice(noticeWarn, msg.err.Error())
+		return m
+	}
+	m.stopping = ""
+	switch msg.action {
+	case plan.CancelUnstarted:
+		m.footer = m.footer.withNotice(noticeWarn, "canceled "+name+" before it started")
+	case plan.CancelRunning:
+		grace := ""
+		if n := m.rs.wf.Node(msg.node); n != nil {
+			grace = " (" + n.KillTimeout.String() + ")"
+		}
+		m.footer = m.footer.withNotice(noticeWarn, "canceling "+name+": it got SIGINT and has its kill_timeout"+grace+" to stop. x again kills it now")
+		m.stopping, m.stoppingNotice = msg.node, m.footer.notice
+	case plan.KillRunning:
+		m.footer = m.footer.withNotice(noticeWarn, "killing "+name)
+		m.stopping, m.stoppingNotice = msg.node, m.footer.notice
+	}
+	return m
+}
+
 func (m Model) displayName(id string) string {
 	if n := m.rs.wf.Node(id); n != nil {
 		return n.DisplayName()
@@ -514,7 +581,10 @@ func (m Model) footerHelp() ([]key.Binding, [][]key.Binding) {
 	if m.viewOpen {
 		return m.keys.logHelp(), nil
 	}
-	return m.keys.mainHelp(!m.rs.done), m.keys.mainFullHelp()
+	// ctrl+c before the start confirmation quits without starting, so it
+	// is not a cancel there.
+	running := !m.rs.done && m.ask.kind != askStart
+	return m.keys.mainHelp(running), m.keys.mainFullHelp()
 }
 
 // resized recomputes every component's size from the terminal size.
