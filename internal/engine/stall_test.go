@@ -59,6 +59,9 @@ nodes:
 		Bus:         bus,
 		Concurrency: 0,
 		Env:         os.Environ(),
+		Plan:        nil,
+		State:       nil,
+		Reruns:      false,
 		Log:         zerolog.Nop(),
 	})
 

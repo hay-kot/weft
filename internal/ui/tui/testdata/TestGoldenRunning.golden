@@ -42,4 +42,4 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- hjkl select • enter log • ctrl+c cancel • q quit • ? help • f follow • v layout
+ hjkl select • enter log • ctrl+c cancel • q quit • ? help • r rerun • R rerun+downstream • f follow • v layout

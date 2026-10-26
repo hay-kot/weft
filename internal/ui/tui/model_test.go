@@ -90,7 +90,7 @@ func at(sec float64) time.Time { return t0.Add(time.Duration(sec * float64(time.
 func ev(e ...events.Event) eventsMsg { return eventsMsg{events: e} }
 
 func started() events.RunStarted {
-	return events.RunStarted{Workflow: workflowName, RunID: testRun().ID, RunDir: testRun().Dir, At: t0}
+	return events.RunStarted{Workflow: workflowName, RunID: testRun().ID, RunDir: testRun().Dir, Pass: 1, At: t0}
 }
 
 func running(node string, sec float64) events.NodeChanged {
@@ -273,12 +273,12 @@ func TestQuitDuringRunAsksFirst(t *testing.T) {
 
 	m, cmd := update(t, m, press("q"))
 	assert.Nil(t, cmd)
-	assert.True(t, m.confirmQuit)
+	assert.Equal(t, askQuit, m.ask.kind)
 	assert.Contains(t, m.footer.notice, "Press y to cancel it and quit")
 
 	m, cmd = update(t, m, press("n"))
 	assert.Nil(t, cmd)
-	assert.False(t, m.confirmQuit)
+	assert.Equal(t, askNone, m.ask.kind)
 	assert.Empty(t, m.footer.notice)
 	assert.Equal(t, nRelease, m.graph.selected, "the dismissing key does nothing else")
 
@@ -336,7 +336,7 @@ func TestFullScreenLog(t *testing.T) {
 	assert.False(t, m.viewOpen)
 	m = send(t, m, press("enter"), press("q"))
 	assert.False(t, m.viewOpen, "q closes the log view")
-	assert.False(t, m.confirmQuit, "and does not ask to quit")
+	assert.Equal(t, askNone, m.ask.kind, "and does not ask to quit")
 }
 
 func TestHelpToggle(t *testing.T) {

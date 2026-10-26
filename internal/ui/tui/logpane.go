@@ -194,7 +194,7 @@ func statusText(st *nodeStatus) string {
 		return string(st.State)
 	case events.Waiting:
 		return "waiting for the terminal"
-	case events.Pending, events.Ready, events.Running, events.Succeeded, events.Skipped:
+	case events.Pending, events.Ready, events.Running, events.Succeeded, events.Skipped, events.Excluded:
 		return string(st.State)
 	default:
 		return string(st.State)
@@ -232,7 +232,14 @@ func placeholder(rs *runState, id string) string {
 			return "did not run"
 		}
 		return "no output"
-	case events.Succeeded, events.Failed, events.Skipped:
+	case events.Skipped:
+		if st.Attempt == 0 {
+			return "skipped: it succeeded in an earlier attempt"
+		}
+		return fmt.Sprintf("skipped: it succeeded in attempt %d, whose output is in %s", st.Attempt, rs.run.AttemptLogPath(id, st.Attempt))
+	case events.Excluded:
+		return "excluded: not selected for this run, so it does not run"
+	case events.Succeeded, events.Failed:
 		if n.Interactive {
 			return "interactive: its output went to the terminal and was not captured"
 		}

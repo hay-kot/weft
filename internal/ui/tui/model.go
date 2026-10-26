@@ -9,6 +9,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/hay-kot/weft/internal/events"
 	"github.com/hay-kot/weft/internal/layout"
+	"github.com/hay-kot/weft/internal/plan"
 	"github.com/hay-kot/weft/internal/store"
 	"github.com/hay-kot/weft/internal/workflow"
 )
@@ -31,10 +33,25 @@ type Options struct {
 	// ExitOnEnd quits as soon as the run finishes instead of waiting for q.
 	ExitOnEnd bool
 	// Interrupt escalates a cancel: the first call cancels the run, later
-	// calls kill the running nodes. It returns how many times it has been
-	// called, counting calls from signal handlers too.
+	// calls kill the running nodes. It returns the escalation level,
+	// counting calls from signal handlers too, or 0 when no pass of the run
+	// is active.
 	Interrupt func() int
-	Log       zerolog.Logger
+	// Plan, when set, is where nodes start before the first events arrive.
+	Plan *plan.Plan
+	// Confirm, when set, is a question shown before the run starts. y calls
+	// Start; any other key quits without starting.
+	Confirm string
+	// Start starts the run once Confirm is answered with y.
+	Start func()
+	// Rerun reruns a node, with everything downstream of it when
+	// downstream is set. Unless force is set it may return a
+	// *plan.DriftError, and the TUI asks before calling it again with force.
+	Rerun func(id string, downstream, force bool) error
+	// Notice is shown in the footer at the start, for example to say that
+	// the run resumes an earlier one.
+	Notice string
+	Log    zerolog.Logger
 }
 
 // Minimum terminal size for the full layout. Smaller terminals get a
@@ -73,7 +90,35 @@ type (
 		ran   bool
 		err   error
 	}
+	// rerunDoneMsg reports how a rerun request went.
+	rerunDoneMsg struct {
+		node       string
+		downstream bool
+		err        error
+	}
 )
+
+// askKind is what a footer question is about.
+type askKind int
+
+const (
+	askNone askKind = iota
+	// askQuit: q during a run; y cancels it and quits once nodes stop.
+	askQuit
+	// askStart: Options.Confirm before the run starts.
+	askStart
+	// askRerun: the workflow file or HEAD changed; y reruns anyway.
+	askRerun
+)
+
+// question is the footer question waiting for an answer.
+type question struct {
+	kind       askKind
+	node       string
+	downstream bool
+}
+
+var noQuestion = question{kind: askNone, node: "", downstream: false}
 
 // Model is the root Bubble Tea model.
 type Model struct {
@@ -95,15 +140,24 @@ type Model struct {
 	// auto makes the selection follow the run until the user moves it.
 	auto         bool
 	cancelLevel  int
-	confirmQuit  bool
+	ask          question
 	quitAfterRun bool
+	// ticking is set while a tick is scheduled, so a pass that starts
+	// after the clock stopped restarts it exactly once.
+	ticking bool
 }
 
 // New returns a Model for one run.
 func New(opts Options) Model {
-	rs := newRunState(opts.Workflow, opts.Run, logCapacity)
+	rs := newRunState(opts.Workflow, opts.Run, opts.Plan, logCapacity)
 	styles := DefaultStyles()
 	g := newGraphPane(layout.FromWorkflow(opts.Workflow), rs.cells(time.Time{}))
+	f := newFooter(styles).withNotice(noticeInfo, opts.Notice)
+	ask := noQuestion
+	if opts.Confirm != "" {
+		ask = question{kind: askStart, node: "", downstream: false}
+		f = f.withNotice(noticeWarn, opts.Confirm)
+	}
 	return Model{
 		opts:         opts,
 		keys:         DefaultKeyMap(),
@@ -116,12 +170,13 @@ func New(opts Options) Model {
 		graph:        g,
 		pane:         newLogPane(g.selected),
 		view:         newLogView(g.selected),
-		footer:       newFooter(styles),
+		footer:       f,
 		viewOpen:     false,
 		auto:         true,
 		cancelLevel:  0,
-		confirmQuit:  false,
+		ask:          ask,
 		quitAfterRun: false,
+		ticking:      true,
 	}
 }
 
@@ -150,13 +205,16 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		m.now = msg.at
 		m.graph = m.graph.withCells(m.rs.cells(m.now))
 		if m.rs.done {
+			m.ticking = false
 			return m, nil
 		}
 		return m, tick()
 	case eventsMsg:
 		return m.applyEvents(msg.events)
 	case interruptedMsg:
-		return m.interrupted(msg), nil
+		return m.interrupted(msg)
+	case rerunDoneMsg:
+		return m.rerunDone(msg), nil
 	case lendMsg:
 		return m, m.lend(msg)
 	case lendDoneMsg:
@@ -169,11 +227,17 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 
 func (m Model) applyEvents(evs []events.Event) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
-	finished := false
 	for _, e := range evs {
 		switch e := e.(type) {
 		case events.RunStarted:
 			m.rs.started = e.At
+			if m.rs.done {
+				m = m.passStarted()
+				if !m.ticking {
+					m.ticking = true
+					cmds = append(cmds, tick())
+				}
+			}
 		case events.NodeChanged:
 			m = m.nodeChanged(e)
 		case events.NodeOutput:
@@ -189,25 +253,33 @@ func (m Model) applyEvents(evs []events.Event) (Model, tea.Cmd) {
 			}
 		case events.RunFinished:
 			m.rs.done, m.rs.success, m.rs.finished = true, e.Success, e.At
-			finished = true
+			m = m.runFinished()
+			if m.opts.ExitOnEnd || m.quitAfterRun {
+				cmds = append(cmds, tea.Quit)
+			}
 		case events.Barrier:
 			cmds = append(cmds, func() tea.Msg { e.Done(); return nil })
-		}
-	}
-	if finished {
-		m = m.runFinished()
-		if m.opts.ExitOnEnd || m.quitAfterRun {
-			cmds = append(cmds, tea.Quit)
 		}
 	}
 	m.graph = m.graph.withCells(m.rs.cells(m.now))
 	return m, tea.Batch(cmds...)
 }
 
+// passStarted makes a finished run active again: a rerun after the end
+// started another pass.
+func (m Model) passStarted() Model {
+	m.rs.done, m.rs.success, m.rs.finished = false, false, time.Time{}
+	m.cancelLevel = 0
+	return m
+}
+
 func (m Model) nodeChanged(e events.NodeChanged) Model {
 	st, ok := m.rs.nodes[e.Node]
 	if !ok {
 		return m
+	}
+	if buf := m.rs.logs[e.Node]; e.State == events.Running && buf != nil && buf.end() > buf.first() {
+		buf.append(logLine{Text: fmt.Sprintf("── attempt %d ──", e.Attempt), Notice: true})
 	}
 	st.State, st.Attempt, st.ExitCode = e.State, e.Attempt, e.ExitCode
 	st.Err, st.Reason, st.Started, st.Finished = e.Err, e.Reason, e.Started, e.Finished
@@ -220,7 +292,15 @@ func (m Model) nodeChanged(e events.NodeChanged) Model {
 // runFinished points an untouched selection at the first failure, so the
 // end screen shows what went wrong.
 func (m Model) runFinished() Model {
-	m.footer = m.footer.withNotice(noticeInfo, "")
+	switch m.ask.kind {
+	case askQuit:
+		// q quits outright now, so the question is moot.
+		m.ask = noQuestion
+		m.footer = m.footer.withNotice(noticeInfo, "")
+	case askNone:
+		m.footer = m.footer.withNotice(noticeInfo, "")
+	case askStart, askRerun:
+	}
 	if !m.auto || m.rs.success || m.rs.state(m.graph.selected) == events.Failed {
 		return m
 	}
@@ -238,10 +318,15 @@ func (m Model) selectNode(id string) Model {
 	return m
 }
 
-func (m Model) interrupted(msg interruptedMsg) Model {
+func (m Model) interrupted(msg interruptedMsg) (Model, tea.Cmd) {
+	if m.ask.kind == askStart {
+		// A signal before the user answered: don't start at all.
+		m.ask = noQuestion
+		return m, tea.Quit
+	}
 	m.cancelLevel = max(m.cancelLevel, msg.level)
-	if m.rs.done {
-		return m
+	if m.rs.done || msg.level == 0 {
+		return m, nil
 	}
 	from := ""
 	if msg.signal != "" {
@@ -255,7 +340,7 @@ func (m Model) interrupted(msg interruptedMsg) Model {
 	default:
 		m.footer = m.footer.withNotice(noticeWarn, "canceling"+from+": running nodes got SIGINT and their grace period. ctrl+c again kills them now")
 	}
-	return m
+	return m, nil
 }
 
 func (m Model) interrupt() tea.Cmd {
@@ -269,15 +354,11 @@ func (m Model) interrupt() tea.Cmd {
 }
 
 func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
-	if m.confirmQuit {
-		m.confirmQuit = false
-		m.footer = m.footer.withNotice(noticeInfo, "")
-		if key.Matches(k, m.keys.Confirm) {
-			m.quitAfterRun = true
-			return m, m.interrupt()
-		}
-		if !key.Matches(k, m.keys.Cancel) {
-			return m, nil
+	if m.ask.kind != askNone {
+		var cmd tea.Cmd
+		var handled bool
+		if m, cmd, handled = m.answer(k); handled {
+			return m, cmd
 		}
 	}
 
@@ -298,11 +379,13 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	switch {
+	case key.Matches(k, m.keys.Rerun), key.Matches(k, m.keys.RerunAll):
+		return m.requestRerun(m.graph.selected, key.Matches(k, m.keys.RerunAll))
 	case key.Matches(k, m.keys.Quit):
 		if m.rs.done {
 			return m, tea.Quit
 		}
-		m.confirmQuit = true
+		m.ask = question{kind: askQuit, node: "", downstream: false}
 		m.footer = m.footer.withNotice(noticeWarn, "The run is still going. Press y to cancel it and quit, any other key to keep it running.")
 		return m, nil
 	case key.Matches(k, m.keys.Help):
@@ -328,6 +411,91 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 	m.pane, _ = m.pane.Update(k, m.keys, m.rs.logs[m.pane.node])
 	return m, nil
+}
+
+// answer handles a key while a question waits. It reports whether the key
+// is used up; a ctrl+c that only dismisses a question still cancels.
+func (m Model) answer(k tea.KeyPressMsg) (Model, tea.Cmd, bool) {
+	ask := m.ask
+	m.ask = noQuestion
+	yes := key.Matches(k, m.keys.Confirm)
+	switch ask.kind {
+	case askStart:
+		if !yes {
+			return m, tea.Quit, true
+		}
+		m.footer = m.footer.withNotice(noticeInfo, m.opts.Notice)
+		start := m.opts.Start
+		return m, func() tea.Msg {
+			if start != nil {
+				start()
+			}
+			return nil
+		}, true
+	case askQuit:
+		m.footer = m.footer.withNotice(noticeInfo, "")
+		if yes {
+			m.quitAfterRun = true
+			return m, m.interrupt(), true
+		}
+	case askRerun:
+		if yes {
+			m.footer = m.footer.withNotice(noticeInfo, "rerunning "+m.displayName(ask.node))
+			return m, m.rerun(ask.node, ask.downstream, true), true
+		}
+		m.footer = m.footer.withNotice(noticeInfo, "rerun of "+m.displayName(ask.node)+" skipped")
+	case askNone:
+	}
+	return m, nil, !key.Matches(k, m.keys.Cancel)
+}
+
+// requestRerun checks that id may rerun before asking for it, so an
+// ineligible node gets its reason at once. The engine checks again.
+func (m Model) requestRerun(id string, downstream bool) (Model, tea.Cmd) {
+	if id == "" || m.opts.Rerun == nil {
+		return m, nil
+	}
+	if m.cancelLevel > 0 && !m.rs.done {
+		m.footer = m.footer.withNotice(noticeWarn, "the run is being canceled; rerun once it has stopped")
+		return m, nil
+	}
+	if _, err := plan.Rerun(m.rs.wf, m.rs.states(), id, downstream); err != nil {
+		m.footer = m.footer.withNotice(noticeWarn, err.Error())
+		return m, nil
+	}
+	return m, m.rerun(id, downstream, false)
+}
+
+func (m Model) rerun(id string, downstream, force bool) tea.Cmd {
+	fn := m.opts.Rerun
+	return func() tea.Msg {
+		return rerunDoneMsg{node: id, downstream: downstream, err: fn(id, downstream, force)}
+	}
+}
+
+func (m Model) rerunDone(msg rerunDoneMsg) Model {
+	name := m.displayName(msg.node)
+	if drift, ok := errors.AsType[*plan.DriftError](msg.err); ok {
+		m.ask = question{kind: askRerun, node: msg.node, downstream: msg.downstream}
+		m.footer = m.footer.withNotice(noticeWarn, "Since this run last started, "+strings.Join(drift.Reasons, " and ")+". y reruns "+name+" anyway, any other key skips it.")
+		return m
+	}
+	switch {
+	case msg.err != nil:
+		m.footer = m.footer.withNotice(noticeWarn, msg.err.Error())
+	case msg.downstream:
+		m.footer = m.footer.withNotice(noticeInfo, "rerunning "+name+" and everything downstream of it")
+	default:
+		m.footer = m.footer.withNotice(noticeInfo, "rerunning "+name)
+	}
+	return m
+}
+
+func (m Model) displayName(id string) string {
+	if n := m.rs.wf.Node(id); n != nil {
+		return n.DisplayName()
+	}
+	return id
 }
 
 // interactiveNode returns the interactive node that is running, which is

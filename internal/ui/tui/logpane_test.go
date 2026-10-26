@@ -28,7 +28,7 @@ func TestLogPaneShowResetsScrollForANewNode(t *testing.T) {
 }
 
 func TestLogPaneKeys(t *testing.T) {
-	rs := newRunState(deployWorkflow(t), testRun(), 100)
+	rs := newRunState(deployWorkflow(t), testRun(), nil, 100)
 	fill(rs, nGuard, 50)
 	keys := DefaultKeyMap()
 	buf := rs.logs[nGuard]
@@ -63,7 +63,7 @@ func TestLogPaneKeys(t *testing.T) {
 }
 
 func TestLogPaneViewIsExactlyItsSize(t *testing.T) {
-	rs := newRunState(deployWorkflow(t), testRun(), 100)
+	rs := newRunState(deployWorkflow(t), testRun(), nil, 100)
 	rs.logs[nGuard].append(logLine{Text: strings.Repeat("wide ", 100), Notice: false})
 	rs.logs[nGuard].append(logLine{Text: "\x1b[31munterminated red", Notice: false})
 	for _, w := range []int{20, 80, 160} {
@@ -124,7 +124,7 @@ func TestPlaceholder(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rs := newRunState(deployWorkflow(t), testRun(), 10)
+			rs := newRunState(deployWorkflow(t), testRun(), nil, 10)
 			tt.setup(rs)
 			assert.Equal(t, tt.want, placeholder(rs, tt.node))
 		})
@@ -132,7 +132,7 @@ func TestPlaceholder(t *testing.T) {
 }
 
 func TestLogViewSidewaysScrollStopsAtTheWidestLine(t *testing.T) {
-	rs := newRunState(deployWorkflow(t), testRun(), 100)
+	rs := newRunState(deployWorkflow(t), testRun(), nil, 100)
 	rs.logs[nGuard].append(logLine{Text: strings.Repeat("x", 30), Notice: false})
 	v := newLogView(nGuard).withSize(20, 5)
 	keys := DefaultKeyMap()
@@ -147,7 +147,7 @@ func TestLogViewSidewaysScrollStopsAtTheWidestLine(t *testing.T) {
 }
 
 func TestLogViewLineScroll(t *testing.T) {
-	rs := newRunState(deployWorkflow(t), testRun(), 100)
+	rs := newRunState(deployWorkflow(t), testRun(), nil, 100)
 	fill(rs, nGuard, 30)
 	v := newLogView(nGuard).withSize(80, 10)
 	keys := DefaultKeyMap()
@@ -167,7 +167,7 @@ func TestFit(t *testing.T) {
 }
 
 func TestLogPaneGolden(t *testing.T) {
-	rs := newRunState(deployWorkflow(t), testRun(), 100)
+	rs := newRunState(deployWorkflow(t), testRun(), nil, 100)
 	st := rs.nodes[nRelease]
 	st.State, st.Started = events.Running, t0
 	for _, l := range []string{"\x1b[36m•\x1b[0m building binaries  layout=dist", "• publishing  example.invalid/stub:v1.42.0"} {

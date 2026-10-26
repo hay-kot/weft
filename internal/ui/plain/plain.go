@@ -119,6 +119,8 @@ func (r *Renderer) state(e events.NodeChanged) {
 		r.line(e.Node, "⊘", sgrYel, e.Err+dur)
 	case events.Skipped:
 		r.line(e.Node, "✓", sgrDim, "skipped: succeeded in an earlier attempt")
+	case events.Excluded:
+		r.line(e.Node, "·", sgrDim, "excluded: not selected for this run")
 	case events.Pending, events.Ready:
 	}
 }

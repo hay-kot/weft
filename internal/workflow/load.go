@@ -138,12 +138,26 @@ func Load(path, root string) (*Workflow, error) {
 		return nil, err
 	}
 
-	sum := sha256.Sum256(data)
-	wf.Hash = hex.EncodeToString(sum[:])
+	wf.Hash = hash(data)
 	wf.Path = path
 	wf.Root = root
 	wf.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	return wf, nil
+}
+
+// HashFile returns the hash Load would record for the file at path, so a
+// caller can tell whether the file changed since it was loaded.
+func HashFile(path string) (string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // the path is a workflow weft already loaded
+	if err != nil {
+		return "", err
+	}
+	return hash(data), nil
+}
+
+func hash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // Parse parses and validates workflow YAML. Name, Path, Root, and Hash are

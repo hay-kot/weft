@@ -35,7 +35,7 @@ func press(s string) tea.KeyPressMsg {
 func deployPane(t *testing.T, width, height int) (graphPane, *runState) {
 	t.Helper()
 	wf := deployWorkflow(t)
-	rs := newRunState(wf, testRun(), 10)
+	rs := newRunState(wf, testRun(), nil, 10)
 	p := newGraphPane(layout.FromWorkflow(wf), rs.cells(t0))
 	return p.withSize(width, height), rs
 }

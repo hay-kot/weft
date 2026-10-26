@@ -5,6 +5,7 @@ import (
 
 	"github.com/hay-kot/weft/internal/events"
 	"github.com/hay-kot/weft/internal/layout"
+	"github.com/hay-kot/weft/internal/plan"
 	"github.com/hay-kot/weft/internal/store"
 	"github.com/hay-kot/weft/internal/ui"
 	"github.com/hay-kot/weft/internal/workflow"
@@ -34,7 +35,10 @@ type runState struct {
 	logs     map[string]*logBuffer
 }
 
-func newRunState(wf *workflow.Workflow, run *store.Run, logCap int) *runState {
+// newRunState returns the state before any event. With a plan, nodes start
+// as planned, so a run waiting for confirmation already shows what it
+// will skip.
+func newRunState(wf *workflow.Workflow, run *store.Run, p *plan.Plan, logCap int) *runState {
 	rs := &runState{
 		wf:       wf,
 		run:      run,
@@ -46,13 +50,31 @@ func newRunState(wf *workflow.Workflow, run *store.Run, logCap int) *runState {
 		logs:     make(map[string]*logBuffer, len(wf.Nodes)),
 	}
 	for _, n := range wf.Nodes {
-		rs.nodes[n.ID] = &nodeStatus{
+		st := &nodeStatus{
 			State: events.Pending, Attempt: 1, ExitCode: 0, Err: "", Reason: "",
 			Started: time.Time{}, Finished: time.Time{},
 		}
+		if p != nil {
+			if pn, ok := p.Nodes[n.ID]; ok {
+				st.State, st.Attempt = pn.State, pn.Attempt
+				if pn.State != events.Pending {
+					st.Started, st.Finished, st.ExitCode = pn.Prior.Started, pn.Prior.Finished, pn.Prior.ExitCode
+				}
+			}
+		}
+		rs.nodes[n.ID] = st
 		rs.logs[n.ID] = newLogBuffer(logCap)
 	}
 	return rs
+}
+
+// states returns every node's state.
+func (rs *runState) states() map[string]events.State {
+	out := make(map[string]events.State, len(rs.nodes))
+	for id, st := range rs.nodes {
+		out[id] = st.State
+	}
+	return out
 }
 
 // state returns a node's state, or pending for an unknown node.
@@ -121,6 +143,8 @@ func icon(s events.State) string {
 		return "✗"
 	case events.Blocked, events.Canceled:
 		return "⊘"
+	case events.Excluded:
+		return "·"
 	case events.Pending, events.Ready:
 		return "○"
 	default:
@@ -192,7 +216,7 @@ func (rs *runState) autoSelect(selected, changed string) string {
 		if cur != events.Failed {
 			return changed
 		}
-	case events.Succeeded, events.Skipped, events.Canceled, events.Blocked:
+	case events.Succeeded, events.Skipped, events.Canceled, events.Blocked, events.Excluded:
 		if changed == selected {
 			for _, n := range rs.wf.Nodes {
 				if s := rs.state(n.ID); s == events.Running || s == events.Waiting {

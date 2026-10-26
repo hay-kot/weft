@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -60,6 +61,8 @@ type behavior struct {
 	// trapINT makes a hanging node ignore graceful cancel, like a process
 	// that traps SIGINT and keeps going. Only Kill ends it.
 	trapINT bool
+	// gate, when set, holds the node until it closes.
+	gate chan struct{}
 }
 
 type fakeRunner struct {
@@ -74,26 +77,43 @@ type fakeRunner struct {
 	overlaps map[string][]string
 	killed   []string
 	onStart  func(node string)
+	// perAttempt overrides behaviors for one attempt of a node.
+	perAttempt map[string]map[int]behavior
 }
 
 func newFake(b map[string]behavior) *fakeRunner {
 	return &fakeRunner{
-		mu:        sync.Mutex{},
-		behaviors: b,
-		running:   0,
-		peak:      0,
-		started:   nil,
-		ended:     nil,
-		active:    map[string]bool{},
-		overlaps:  map[string][]string{},
-		killed:    nil,
-		onStart:   nil,
+		mu:         sync.Mutex{},
+		behaviors:  b,
+		running:    0,
+		peak:       0,
+		started:    nil,
+		ended:      nil,
+		active:     map[string]bool{},
+		overlaps:   map[string][]string{},
+		killed:     nil,
+		onStart:    nil,
+		perAttempt: map[string]map[int]behavior{},
 	}
+}
+
+// attemptOf reads WEFT_ATTEMPT from a spec's environment.
+func attemptOf(spec runner.Spec) int {
+	for _, kv := range spec.Env {
+		if v, ok := strings.CutPrefix(kv, "WEFT_ATTEMPT="); ok {
+			n, _ := strconv.Atoi(v)
+			return n
+		}
+	}
+	return 0
 }
 
 func (f *fakeRunner) Run(ctx context.Context, spec runner.Spec) runner.Result {
 	f.mu.Lock()
 	b := f.behaviors[spec.Node]
+	if pa, ok := f.perAttempt[spec.Node][attemptOf(spec)]; ok {
+		b = pa
+	}
 	var others []string
 	for id := range f.active {
 		others = append(others, id)
@@ -123,6 +143,9 @@ func (f *fakeRunner) Run(ctx context.Context, spec runner.Spec) runner.Result {
 	}
 	if b.delay > 0 {
 		time.Sleep(b.delay)
+	}
+	if b.gate != nil {
+		<-b.gate
 	}
 	if b.hang {
 		done := ctx.Done()
@@ -168,8 +191,25 @@ type harness struct {
 	lender   *fakeLender
 	run      *store.Run
 	logBuf   *syncBuffer
+	mu       sync.Mutex
 	events   []events.Event
 	done     chan struct{}
+}
+
+// snapshot returns the events collected so far.
+func (h *harness) snapshot() []events.Event {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.events)
+}
+
+// waitEvent waits until an event satisfies match and returns how many
+// events had arrived by then.
+func (h *harness) waitEvent(t *testing.T, match func(events.Event) bool) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return slices.ContainsFunc(h.snapshot(), match)
+	}, 5*time.Second, 5*time.Millisecond)
 }
 
 type syncBuffer struct {
@@ -191,6 +231,12 @@ func (b *syncBuffer) String() string {
 
 func newHarness(t *testing.T, yml string, b map[string]behavior, concurrency int) *harness {
 	t.Helper()
+	return newHarnessWith(t, yml, b, func(o *engine.Options) { o.Concurrency = concurrency })
+}
+
+// newHarnessWith builds a harness whose engine options mod may change.
+func newHarnessWith(t *testing.T, yml string, b map[string]behavior, mod func(*engine.Options)) *harness {
+	t.Helper()
 	wf, err := workflow.Parse([]byte(yml))
 	require.NoError(t, err)
 	root := t.TempDir()
@@ -208,6 +254,7 @@ func newHarness(t *testing.T, yml string, b map[string]behavior, concurrency int
 		lender:   &fakeLender{err: nil, calls: 0},
 		run:      run,
 		logBuf:   &syncBuffer{mu: sync.Mutex{}, buf: bytes.Buffer{}},
+		mu:       sync.Mutex{},
 		events:   nil,
 		done:     make(chan struct{}),
 	}
@@ -216,22 +263,29 @@ func newHarness(t *testing.T, yml string, b map[string]behavior, concurrency int
 	go func() {
 		defer close(h.done)
 		for e := range sub.C {
+			h.mu.Lock()
 			h.events = append(h.events, e)
+			h.mu.Unlock()
 		}
 	}()
 	t.Cleanup(bus.Close)
 
 	log := zerolog.New(h.logBuf).Level(zerolog.DebugLevel).With().Str("run_id", run.ID).Logger()
-	h.eng = engine.New(engine.Options{
+	opts := engine.Options{
 		Workflow:    wf,
 		Run:         run,
 		Runner:      h.fake,
 		Lender:      h.lender,
 		Bus:         bus,
-		Concurrency: concurrency,
+		Concurrency: 0,
 		Env:         nil,
+		Plan:        nil,
+		State:       nil,
+		Reruns:      false,
 		Log:         log,
-	})
+	}
+	mod(&opts)
+	h.eng = engine.New(opts)
 	h.closeBus = bus.Close
 	return h
 }
@@ -577,6 +631,9 @@ nodes:
 		Bus:         nil,
 		Concurrency: 0,
 		Env:         []string{"BASE=1"},
+		Plan:        nil,
+		State:       nil,
+		Reruns:      false,
 		Log:         zerolog.Nop(),
 	})
 	h.eng.Run(t.Context())

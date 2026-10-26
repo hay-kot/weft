@@ -5,7 +5,9 @@
 //
 //	.weft/runs/<workflow>/<run-id>/
 //	  weft.log                 weft's JSON log for this run
-//	  events.jsonl             engine events, one JSON object per line
+//	  state.json               node states and history, for resume
+//	  lock                     held by the weft process using the run
+//	  events.jsonl            engine events, one JSON object per line
 //	  nodes/<node>/<n>.log     combined output of attempt n
 //	  nodes/<node>/<n>.json    AttemptRecord for attempt n
 package store
@@ -19,7 +21,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"time"
 
@@ -104,28 +105,25 @@ func ensureGitignore(root string) error {
 }
 
 // Prune deletes the oldest run directories of a workflow so that at most
-// keep remain. Directory names that are not run IDs are left alone.
+// keep remain. Directory names that are not run IDs are left alone, and so
+// is a run another weft process holds locked; it counts toward keep.
 func Prune(root, workflowName string, keep int) error {
 	dir := WorkflowRunsDir(root, workflowName)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
+	ids, err := runIDs(dir)
 	if err != nil {
 		return err
 	}
-	var ids []string
-	for _, e := range entries {
-		if e.IsDir() && isRunID(e.Name()) {
-			ids = append(ids, e.Name())
+	for i := 0; len(ids)-i > keep; i++ {
+		run := &Run{ID: ids[i], Dir: filepath.Join(dir, ids[i]), Workflow: workflowName}
+		lock, err := run.Lock()
+		if err != nil {
+			continue
 		}
-	}
-	sort.Strings(ids)
-	for len(ids) > keep {
-		if err := os.RemoveAll(filepath.Join(dir, ids[0])); err != nil {
-			return fmt.Errorf("prune run %s: %w", ids[0], err)
+		err = os.RemoveAll(run.Dir)
+		lock.Release()
+		if err != nil {
+			return fmt.Errorf("prune run %s: %w", ids[i], err)
 		}
-		ids = ids[1:]
 	}
 	return nil
 }
@@ -209,6 +207,9 @@ func (r *Run) RelPath(path string) string {
 	return rel
 }
 
+// writeFileAtomic replaces path with data through a synced temporary file
+// and a rename, then syncs the directory so the rename itself survives a
+// crash.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, dirMode); err != nil {
@@ -227,8 +228,27 @@ func writeFileAtomic(path string, data []byte) error {
 		_ = tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // dir is a run directory weft created
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

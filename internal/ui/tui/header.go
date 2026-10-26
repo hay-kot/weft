@@ -84,7 +84,7 @@ func (p phase) style(s Styles) func(...string) string {
 }
 
 // summaryOrder lists states in the order the finished header counts them.
-var summaryOrder = []events.State{events.Succeeded, events.Skipped, events.Failed, events.Blocked, events.Canceled}
+var summaryOrder = []events.State{events.Succeeded, events.Skipped, events.Failed, events.Blocked, events.Canceled, events.Excluded}
 
 // progress returns "3/7 done" while running and the per-state counts once
 // the run is over.

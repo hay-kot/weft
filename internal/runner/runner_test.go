@@ -54,6 +54,7 @@ func spec(t *testing.T, script string, out *syncBuffer) runner.Spec {
 		Output:      out,
 		Interactive: false,
 		Kill:        nil,
+		Started:     nil,
 		Log:         zerolog.Nop(),
 	}
 }
@@ -310,4 +311,14 @@ func TestNodeRunsInItsOwnSession(t *testing.T) {
 	_, err := fmt.Sscanf(strings.TrimSpace(out.String()), "pid=%d sid=%d", &pid, &sid)
 	require.NoError(t, err, "output: %s", out.String())
 	assert.Equal(t, pid, sid, "a non-interactive node must lead its own session, with no controlling terminal")
+}
+
+func TestStartedReportsProcessGroup(t *testing.T) {
+	out := newBuf()
+	s := spec(t, "echo $$", out)
+	var pgid int
+	s.Started = func(id int) { pgid = id }
+	res := runner.Process{}.Run(t.Context(), s)
+	require.True(t, res.Success())
+	assert.Equal(t, strings.TrimSpace(out.String()), strconv.Itoa(pgid), "the shell leads its own group")
 }

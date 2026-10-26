@@ -503,6 +503,107 @@ scenario_tui_flood() {
   [ "$(wc -l <"$(latest_run)/nodes/guard/1.log")" -ge 200000 ] || fail "guard's node log lost output"
 }
 
+# fail_deploy_plain: a plain run where deploy fails, as the run that the
+# resume scenarios carry on. It prints the run directory.
+fail_deploy_plain() {
+  WEFT_FIXTURE_FAIL=deploy "$bin" run --ui=plain "$fixture" </dev/null >"$out/$scenario.first.txt" 2>&1 && fail "the failing run succeeded"
+  latest_run
+}
+
+# The M4 "done when" in plain mode: resume reruns deploy and skips
+# release, and deploy rolls out the tag release recorded the first time.
+scenario_plain_resume() {
+  local run tag
+  run=$(fail_deploy_plain)
+  tag=$(cat "$run/fixture/release-tag")
+  start 160 45 "$(weft "$bin" run --ui=plain --resume "$fixture")"
+  wait_for 'Only "yes" is accepted' || return
+  tm send-keys -t smoke yes Enter
+  local status
+  status=$(wait_exit)
+  save final
+  expect_status "$status" 0
+  expect final "weft: run $(basename "$run")"
+  expect final "--resume continues run $(basename "$run"): running deploy, tofu-apply; skipping 5 that succeeded"
+  expect final "release    ✓ skipped: succeeded in an earlier attempt"
+  expect final "deploy     ▶ started (attempt 2)"
+  expect final "deploy: rolling out $tag (stub)"
+  expect final "succeeded (5 skipped, 2 succeeded)"
+  [ "$(latest_run)" = "$run" ] || fail "resume made a new run directory"
+  [ ! -e "$run/nodes/release/2.log" ] || fail "release ran again"
+  [ "$(cat "$run/fixture/release-tag")" = "$tag" ] || fail "release-tag changed"
+  grep -q '"state": "succeeded"' "$run/nodes/deploy/2.json" || fail "deploy attempt 2 record is not succeeded"
+  grep -q '"mode": "resume"' "$run/state.json" || fail "state.json history lacks the resume"
+}
+
+# --only leaves the interactive node out, so a run without a terminal
+# still succeeds, and --resume with nothing left exits 0 with a notice.
+scenario_plain_only() {
+  local status=0
+  "$bin" run --ui=plain --only guard,go-check,ui-check,db-backup,release,deploy "$fixture" </dev/null >"$out/$scenario.final.txt" 2>&1 || status=$?
+  expect_status "$status" 0
+  expect final "tofu-apply · excluded: not selected for this run"
+  expect final "succeeded (1 excluded, 6 succeeded)"
+  status=0
+  "$bin" run --ui=plain --from release "$fixture" </dev/null >"$out/$scenario.from.txt" 2>&1 || status=$?
+  expect_status "$status" 1
+  expect from "release    ▶ started (attempt 2)"
+  expect from "tofu-apply ✗ failed: failed to start: interactive node needs a terminal"
+  status=0
+  "$bin" run --ui=plain --resume --only deploy "$fixture" </dev/null >"$out/$scenario.combo.txt" 2>&1 || status=$?
+  expect_status "$status" 1
+  expect combo "can't be combined"
+}
+
+# The M4 "done when" in the TUI: resume shows the skipped nodes, reruns
+# deploy, and hands tofu-apply the terminal.
+scenario_tui_resume() {
+  local run tag
+  run=$(fail_deploy_plain)
+  tag=$(cat "$run/fixture/release-tag")
+  start 160 45 "$(tui -- --resume)"
+  wait_screen "--resume continues run" || return
+  save_screen resumed
+  check_frame resumed 160 45
+  expect resumed "✓ release"
+  expect resumed "attempt 2"
+  wait_for 'Only "yes" is accepted' || return
+  tm send-keys -t smoke yes Enter
+  wait_screen "deploy  succeeded" || return
+  save_screen finished
+  check_frame finished 160 45
+  expect finished "2 succeeded, 5 skipped"
+  quit_and_check 0
+  expect final "succeeded (5 skipped, 2 succeeded)"
+  [ "$(latest_run)" = "$run" ] || fail "resume made a new run directory"
+  [ ! -e "$run/nodes/release/2.log" ] || fail "release ran again"
+  grep -q "rolling out $tag" "$run/nodes/deploy/2.log" || fail "deploy attempt 2 did not roll out $tag"
+}
+
+# r after the run ends starts another pass in the same TUI: the clock and
+# ctrl+c come back, and the log marks the new attempt.
+scenario_tui_rerun() {
+  start 160 45 "$(tui WEFT_FIXTURE_FAIL=deploy WEFT_LOG_LEVEL=debug --)"
+  wait_screen "deploy  failed" 20 || return
+  save_screen failed
+  expect failed "r rerun"
+  tm send-keys -t smoke r
+  wait_screen "── attempt 2 ──" 5 || return
+  wait_screen "deploy  failed" 10 || return
+  save_screen rerun
+  check_frame rerun 160 45
+  expect rerun "attempt 2"
+  local run
+  run=$(latest_run)
+  [ -f "$run/nodes/deploy/2.log" ] || fail "no log for deploy attempt 2"
+  grep -q '"message":"rerun requested"' "$run/weft.log" || fail "weft.log lacks the rerun"
+  grep -q '"message":"run restarted for a rerun"' "$run/weft.log" || fail "weft.log lacks the second pass"
+  tm send-keys -t smoke l r
+  wait_screen "can't rerun tofu-apply: it needs deploy, which is failed" 5 || return
+  quit_and_check 1
+  if grep -q "TUI exited before the run finished" "$run/weft.log"; then fail "quitting after the run looked like a mid-run exit"; fi
+}
+
 # Without a terminal, --ui=tui refuses before creating a run.
 scenario_tui_no_tty() {
   local status=0
@@ -513,7 +614,7 @@ scenario_tui_no_tty() {
 
 all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty plain_stalled_output plain_closed_stdout graph_wide graph_narrow graph_forced_horizontal
   tui_success tui_narrow_fail tui_resize tui_cancel tui_kill tui_quit_confirm tui_exit_on_end
-  tui_interactive_cancel tui_flood tui_no_tty)
+  tui_interactive_cancel tui_flood tui_no_tty plain_resume plain_only tui_resume tui_rerun)
 
 log "building weft into $out"
 (cd "$repo" && go build -o "$bin" .)

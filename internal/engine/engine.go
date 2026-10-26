@@ -1,5 +1,10 @@
 // Package engine schedules workflow nodes, tracks their states, and
 // publishes every change as an event.
+//
+// A run is one or more passes. The first pass starts with Run; each pass
+// ends when no node is running or can start, with a RunFinished event. An
+// engine with Options.Reruns then waits for Rerun, which starts another
+// pass, until Close. Rerun during a pass adds to that pass.
 package engine
 
 import (
@@ -17,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/hay-kot/weft/internal/events"
+	"github.com/hay-kot/weft/internal/plan"
 	"github.com/hay-kot/weft/internal/runner"
 	"github.com/hay-kot/weft/internal/store"
 	"github.com/hay-kot/weft/internal/workflow"
@@ -47,8 +53,23 @@ type Options struct {
 	// Env is the base environment for every node, usually os.Environ plus
 	// color settings.
 	Env []string
-	Log zerolog.Logger
+	// Plan sets where each node starts. A nil Plan is a fresh run.
+	Plan *plan.Plan
+	// State, when set, is the run's persisted state. The engine updates its
+	// nodes and writes it to state.json after every change. The caller
+	// fills in the rest, including the History entry for this start.
+	State *store.State
+	// Reruns keeps the engine taking Rerun requests after a pass ends. Run
+	// then returns only after Close, or once ctx is canceled.
+	Reruns bool
+	Log    zerolog.Logger
 }
+
+// ErrClosed means the engine has stopped taking reruns.
+var ErrClosed = errors.New("the run is over and takes no more reruns")
+
+// ErrCanceling means a rerun arrived while the pass is being canceled.
+var ErrCanceling = errors.New("the run is being canceled; rerun once it has stopped")
 
 // Summary is the outcome of a run.
 type Summary struct {
@@ -71,8 +92,14 @@ type nodeRun struct {
 	attempt  int
 	started  time.Time
 	finished time.Time
-	cancel   context.CancelFunc
-	kill     chan struct{}
+	exitCode int
+	reason   string
+	errText  string
+	// log is the latest attempt's output log, relative to the run dir.
+	log    string
+	pgid   int
+	cancel context.CancelFunc
+	kill   chan struct{}
 }
 
 type finished struct {
@@ -80,17 +107,43 @@ type finished struct {
 	result runner.Result
 }
 
-// Engine runs one workflow. Use it for a single Run call.
+type startedProc struct {
+	id      string
+	attempt int
+	pgid    int
+}
+
+type rerunRequest struct {
+	id         string
+	downstream bool
+	start      store.Start
+	reply      chan error
+}
+
+// Engine runs one workflow.
 type Engine struct {
 	opts        Options
 	concurrency int
 	nodes       map[string]*nodeRun
 	log         zerolog.Logger
+	state       *store.State
+	dirty       bool
 
-	cancelOnce sync.Once
-	cancelCh   chan struct{}
-	killOnce   sync.Once
-	killCh     chan struct{}
+	results  chan finished
+	procs    chan startedProc
+	requests chan rerunRequest
+	runDone  chan struct{}
+
+	closeOnce sync.Once
+	closeCh   chan struct{}
+
+	// mu guards the current pass's cancel state, which Interrupt, Cancel,
+	// and Kill change from other goroutines.
+	mu       sync.Mutex
+	active   bool
+	level    int
+	cancelCh chan struct{}
+	killCh   chan struct{}
 }
 
 // New returns an engine for opts.
@@ -99,64 +152,225 @@ func New(opts Options) *Engine {
 	if opts.Concurrency > 0 {
 		concurrency = opts.Concurrency
 	}
+	p := opts.Plan
+	if p == nil {
+		fresh := plan.Fresh(opts.Workflow)
+		p = &fresh
+	}
 	nodes := make(map[string]*nodeRun, len(opts.Workflow.Nodes))
 	for _, n := range opts.Workflow.Nodes {
-		nodes[n.ID] = &nodeRun{
-			node:     n,
-			state:    events.Pending,
-			attempt:  1,
-			started:  time.Time{},
-			finished: time.Time{},
-			cancel:   nil,
-			kill:     nil,
+		pn := p.Nodes[n.ID]
+		nr := &nodeRun{
+			node: n, state: pn.State, attempt: pn.Attempt,
+			started: time.Time{}, finished: time.Time{}, exitCode: 0, reason: "", errText: "", log: "", pgid: 0,
+			cancel: nil, kill: nil,
 		}
+		switch pn.State {
+		case events.Skipped, events.Excluded:
+			nr.started, nr.finished, nr.exitCode = pn.Prior.Started, pn.Prior.Finished, pn.Prior.ExitCode
+			nr.log = pn.Prior.Log
+			nr.reason = string(pn.State)
+		default:
+			nr.state = events.Pending
+		}
+		nodes[n.ID] = nr
 	}
 	return &Engine{
 		opts:        opts,
 		concurrency: concurrency,
 		nodes:       nodes,
 		log:         opts.Log,
-		cancelOnce:  sync.Once{},
-		cancelCh:    make(chan struct{}),
-		killOnce:    sync.Once{},
-		killCh:      make(chan struct{}),
+		state:       opts.State,
+		dirty:       opts.State != nil,
+		results:     make(chan finished),
+		procs:       make(chan startedProc),
+		requests:    make(chan rerunRequest),
+		runDone:     make(chan struct{}),
+		closeOnce:   sync.Once{},
+		closeCh:     make(chan struct{}),
+		mu:          sync.Mutex{},
+		// The first pass counts as active from the start, so a cancel that
+		// arrives before Run still cancels it.
+		active:   true,
+		level:    0,
+		cancelCh: make(chan struct{}),
+		killCh:   make(chan struct{}),
 	}
+}
+
+// Interrupt escalates a cancel of the current pass: the first call cancels
+// it, later calls kill the running nodes. It returns the escalation level,
+// or 0 when no pass is active, so callers can tell a request to stop the
+// run from one that arrives after it ended.
+func (e *Engine) Interrupt() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.active {
+		return 0
+	}
+	e.level++
+	e.escalate()
+	return e.level
 }
 
 // Cancel stops new nodes from starting and starts graceful shutdown of the
-// running ones. It is safe to call more than once and from any goroutine.
+// running ones. It does nothing between passes or once the pass is already
+// canceling. It is safe to call from any goroutine.
 func (e *Engine) Cancel() {
-	e.cancelOnce.Do(func() { close(e.cancelCh) })
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.active && e.level == 0 {
+		e.level = 1
+		e.escalate()
+	}
 }
 
-// Kill cancels the run and skips the remaining grace periods: running nodes
-// get SIGKILL at once.
+// Kill cancels the pass and skips the remaining grace periods: running
+// nodes get SIGKILL at once.
 func (e *Engine) Kill() {
-	e.Cancel()
-	e.killOnce.Do(func() { close(e.killCh) })
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.active {
+		e.level = max(e.level, 2)
+		e.escalate()
+	}
+}
+
+// escalate closes the channels for the current level. e.mu must be held.
+func (e *Engine) escalate() {
+	if e.level >= 1 && !isClosed(e.cancelCh) {
+		close(e.cancelCh)
+	}
+	if e.level >= 2 && !isClosed(e.killCh) {
+		close(e.killCh)
+	}
+}
+
+// passChannels returns the current pass's cancel and kill channels.
+func (e *Engine) passChannels() (cancel, kill <-chan struct{}) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cancelCh, e.killCh
+}
+
+// Active reports whether a pass is running or about to start. Between
+// passes of an engine with Options.Reruns it is false.
+func (e *Engine) Active() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.active
+}
+
+// cancelRequested reports whether the current pass has been asked to
+// stop, even if the loop has not acted on it yet.
+func (e *Engine) cancelRequested() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.level > 0
+}
+
+func (e *Engine) setActive(active bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.active = active
+	if !active {
+		e.level = 0
+		e.cancelCh = make(chan struct{})
+		e.killCh = make(chan struct{})
+	}
+}
+
+// Close stops the engine taking reruns. Run returns once the current pass,
+// if any, ends.
+func (e *Engine) Close() {
+	e.closeOnce.Do(func() { close(e.closeCh) })
+}
+
+// Rerun resets id, and with downstream every finished node downstream of
+// it, to run again as a new attempt. plan.Rerun decides which nodes are
+// eligible. During a pass the nodes join it; between passes they start a
+// new one. start is recorded in the run's history; its Mode and Nodes are
+// filled in here. Rerun returns ErrClosed once Run has returned and
+// ErrCanceling while the pass is being canceled.
+func (e *Engine) Rerun(id string, downstream bool, start store.Start) error {
+	start.Mode, start.Nodes = store.ModeRerun, []string{id}
+	req := rerunRequest{id: id, downstream: downstream, start: start, reply: make(chan error, 1)}
+	select {
+	case e.requests <- req:
+	case <-e.runDone:
+		return ErrClosed
+	}
+	return <-req.reply
 }
 
 // Run executes the workflow and returns when every node has reached a
-// terminal state. Canceling ctx has the same effect as Cancel.
+// terminal state, or with Options.Reruns, once the engine is closed and
+// idle. Canceling ctx cancels the current pass and stops reruns.
 func (e *Engine) Run(ctx context.Context) Summary {
+	defer close(e.runDone)
 	wf := e.opts.Workflow
 	e.log.Info().Str("workflow", wf.Name).Int("nodes", len(wf.Nodes)).Int("concurrency", e.concurrency).Msg("run started")
-	e.publish(events.RunStarted{Workflow: wf.Name, RunID: e.opts.Run.ID, RunDir: e.opts.Run.Dir, At: time.Now()})
+	pass := 1
+	e.publish(events.RunStarted{Workflow: wf.Name, RunID: e.opts.Run.ID, RunDir: e.opts.Run.Dir, Pass: pass, At: time.Now()})
 	for _, n := range wf.Nodes {
-		e.publishNode(e.nodes[n.ID], "", runner.Result{ExitCode: 0, Signal: "", Reason: "", Err: nil})
+		e.publishNode(e.nodes[n.ID])
 	}
+	e.persist()
 
-	results := make(chan finished)
+	for {
+		e.runPass(ctx)
+		success := e.success()
+		e.setActive(false)
+		e.persist()
+		e.log.Info().Int("pass", pass).Bool("success", success).Interface("counts", e.summary().Counts()).Msg("run finished")
+		e.publish(events.RunFinished{Success: success, At: time.Now()})
+		if !e.opts.Reruns || !e.idle(ctx) {
+			break
+		}
+		pass++
+		e.log.Info().Int("pass", pass).Msg("run restarted for a rerun")
+		e.publish(events.RunStarted{Workflow: wf.Name, RunID: e.opts.Run.ID, RunDir: e.opts.Run.Dir, Pass: pass, At: time.Now()})
+	}
+	return e.summary()
+}
+
+// idle waits between passes for a rerun that starts the next one. It
+// returns false when the engine closes or ctx is canceled.
+func (e *Engine) idle(ctx context.Context) bool {
+	for {
+		select {
+		case req := <-e.requests:
+			// The pass is marked active before the reply, so an Interrupt
+			// that follows a successful Rerun cancels the new pass.
+			e.setActive(true)
+			err := e.applyRerun(req, false)
+			if err != nil {
+				e.setActive(false)
+			}
+			req.reply <- err
+			if err == nil {
+				e.persist()
+				return true
+			}
+		case <-e.closeCh:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// runPass schedules nodes until none is running and none can start.
+func (e *Engine) runPass(ctx context.Context) {
 	running := 0
 	canceling := false
 	ctxDone := ctx.Done()
-	cancelCh := e.cancelCh
-	killCh := e.killCh
+	cancelCh, killCh := e.passChannels()
 
 	for {
 		// Checked before scheduling, not only in the select, so a cancel
 		// that lands together with a result never lets a new node start.
-		if !canceling && (ctx.Err() != nil || isClosed(e.cancelCh)) {
+		if !canceling && (ctx.Err() != nil || isClosed(cancelCh)) {
 			canceling = true
 			ctxDone, cancelCh = nil, nil
 			e.log.Info().Int("running", running).Msg("cancel requested; sending SIGINT to running nodes")
@@ -169,19 +383,27 @@ func (e *Engine) Run(ctx context.Context) Summary {
 		if canceling {
 			e.cancelUnstarted()
 		} else {
-			running += e.schedule(ctx, results, running)
+			running += e.schedule(ctx, running)
 		}
+		e.persist()
 		if running == 0 {
-			break
+			return
 		}
 
 		select {
-		case f := <-results:
+		case f := <-e.results:
 			running--
 			e.finish(f.id, f.result)
 			if !canceling {
 				e.log.Debug().Str("node", f.id).Int("running", running).Msg("slot freed")
 			}
+		case p := <-e.procs:
+			if nr := e.nodes[p.id]; nr.state == events.Running && nr.attempt == p.attempt {
+				nr.pgid = p.pgid
+				e.dirty = true
+			}
+		case req := <-e.requests:
+			req.reply <- e.applyRerun(req, canceling)
 		case <-ctxDone:
 		case <-cancelCh:
 		case <-killCh:
@@ -194,17 +416,35 @@ func (e *Engine) Run(ctx context.Context) Summary {
 			}
 		}
 	}
+}
 
-	summary := Summary{Success: true, States: make(map[string]events.State, len(e.nodes))}
-	for id, nr := range e.nodes {
-		summary.States[id] = nr.state
-		if !e.counts(nr.state, nr.node) {
-			summary.Success = false
-		}
+// applyRerun resets the nodes of a rerun request.
+func (e *Engine) applyRerun(req rerunRequest, canceling bool) error {
+	if canceling || e.cancelRequested() {
+		return ErrCanceling
 	}
-	e.log.Info().Bool("success", summary.Success).Interface("counts", summary.Counts()).Msg("run finished")
-	e.publish(events.RunFinished{Success: summary.Success, At: time.Now()})
-	return summary
+	states := make(map[string]events.State, len(e.nodes))
+	for id, nr := range e.nodes {
+		states[id] = nr.state
+	}
+	ids, err := plan.Rerun(e.opts.Workflow, states, req.id, req.downstream)
+	if err != nil {
+		e.log.Info().Str("node", req.id).Bool("downstream", req.downstream).Err(err).Msg("rerun refused")
+		return err
+	}
+	e.log.Info().Str("node", req.id).Bool("downstream", req.downstream).Strs("nodes", ids).Msg("rerun requested")
+	for _, id := range ids {
+		nr := e.nodes[id]
+		nr.state = events.Pending
+		nr.attempt++
+		nr.started, nr.finished = time.Time{}, time.Time{}
+		nr.exitCode, nr.reason, nr.errText, nr.log, nr.pgid = 0, "", "", "", 0
+		e.publishNode(nr)
+	}
+	if e.state != nil {
+		e.state.History = append(e.state.History, req.start)
+	}
+	return nil
 }
 
 func isClosed(ch <-chan struct{}) bool {
@@ -216,16 +456,29 @@ func isClosed(ch <-chan struct{}) bool {
 	}
 }
 
-// counts reports whether a node's final state leaves the run successful.
-func (e *Engine) counts(state events.State, n *workflow.Node) bool {
-	switch state {
-	case events.Succeeded, events.Skipped:
-		return true
-	case events.Failed:
-		return n.ContinueOnError
-	default:
-		return false
+func (e *Engine) summary() Summary {
+	s := Summary{Success: e.success(), States: make(map[string]events.State, len(e.nodes))}
+	for id, nr := range e.nodes {
+		s.States[id] = nr.state
 	}
+	return s
+}
+
+// success reports whether every node's state leaves the run successful.
+// Excluded nodes were not asked to run, so they don't fail it.
+func (e *Engine) success() bool {
+	for _, nr := range e.nodes {
+		switch nr.state {
+		case events.Succeeded, events.Skipped, events.Excluded:
+		case events.Failed:
+			if !nr.node.ContinueOnError {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Engine) ordered() []*nodeRun {
@@ -234,30 +487,6 @@ func (e *Engine) ordered() []*nodeRun {
 		out = append(out, e.nodes[n.ID])
 	}
 	return out
-}
-
-// satisfied reports whether a need in this state lets a dependent run.
-func (e *Engine) satisfied(need *nodeRun) bool {
-	switch need.state {
-	case events.Succeeded, events.Skipped:
-		return true
-	case events.Failed:
-		return need.node.ContinueOnError
-	default:
-		return false
-	}
-}
-
-// blocks reports whether a need in this state can never be satisfied.
-func (e *Engine) blocks(need *nodeRun) bool {
-	switch need.state {
-	case events.Failed:
-		return !need.node.ContinueOnError
-	case events.Canceled, events.Blocked:
-		return true
-	default:
-		return false
-	}
 }
 
 // resolve moves pending nodes to ready or blocked until nothing changes.
@@ -273,21 +502,21 @@ func (e *Engine) resolve() {
 			ready := true
 			for _, id := range nr.node.Needs {
 				need := e.nodes[id]
-				if e.blocks(need) {
+				if plan.Blocks(need.node, need.state) {
 					e.log.Debug().Str("node", nr.node.ID).Str("need", id).Str("need_state", string(need.state)).Msg("node blocked")
 					e.block(nr, fmt.Sprintf("%s %s", id, need.state))
 					changed = true
 					ready = false
 					break
 				}
-				if !e.satisfied(need) {
+				if !plan.Satisfies(need.node, need.state) {
 					ready = false
 				}
 			}
 			if ready {
 				e.log.Debug().Str("node", nr.node.ID).Strs("needs", nr.node.Needs).Msg("node ready: needs satisfied")
 				nr.state = events.Ready
-				e.publishNode(nr, "", runner.Result{ExitCode: 0, Signal: "", Reason: "", Err: nil})
+				e.publishNode(nr)
 				changed = true
 			}
 		}
@@ -296,7 +525,7 @@ func (e *Engine) resolve() {
 
 // schedule resolves states and starts whatever may start now. It returns how
 // many nodes it started.
-func (e *Engine) schedule(ctx context.Context, results chan<- finished, running int) int {
+func (e *Engine) schedule(ctx context.Context, running int) int {
 	e.resolve()
 
 	var ready []*nodeRun
@@ -326,11 +555,11 @@ func (e *Engine) schedule(ctx context.Context, results chan<- finished, running 
 			if nr.state != events.Waiting {
 				e.log.Debug().Str("node", nr.node.ID).Int("running", running).Msg("interactive node waiting for running nodes to finish")
 				nr.state = events.Waiting
-				e.publishNode(nr, "", runner.Result{ExitCode: 0, Signal: "", Reason: "", Err: nil})
+				e.publishNode(nr)
 			}
 			return 0
 		}
-		e.start(ctx, nr, results)
+		e.start(ctx, nr)
 		return 1
 	}
 
@@ -340,7 +569,7 @@ func (e *Engine) schedule(ctx context.Context, results chan<- finished, running 
 			e.log.Debug().Str("node", nr.node.ID).Int("running", running+started).Int("concurrency", e.concurrency).Msg("node ready but no free slot")
 			break
 		}
-		e.start(ctx, nr, results)
+		e.start(ctx, nr)
 		started++
 	}
 	return started
@@ -353,9 +582,7 @@ func (e *Engine) cancelUnstarted() {
 			e.log.Debug().Str("node", nr.node.ID).Str("from", string(nr.state)).Msg("node canceled before start")
 			nr.state = events.Canceled
 			nr.finished = time.Now()
-			res := runner.Result{ExitCode: -1, Signal: "", Reason: runner.ReasonCanceled, Err: nil}
-			e.writeRecord(nr, res, "")
-			e.publishNode(nr, "canceled before start", res)
+			e.end(nr, runner.Result{ExitCode: -1, Signal: "", Reason: runner.ReasonCanceled, Err: nil}, "canceled before start", "")
 		default:
 		}
 	}
@@ -364,16 +591,14 @@ func (e *Engine) cancelUnstarted() {
 func (e *Engine) block(nr *nodeRun, why string) {
 	nr.state = events.Blocked
 	nr.finished = time.Now()
-	res := runner.Result{ExitCode: -1, Signal: "", Reason: "blocked", Err: nil}
-	e.writeRecord(nr, res, "")
-	e.publishNode(nr, "blocked: "+why, res)
+	e.end(nr, runner.Result{ExitCode: -1, Signal: "", Reason: "blocked", Err: nil}, "blocked: "+why, "")
 }
 
 func (e *Engine) nodeLog(nr *nodeRun) zerolog.Logger {
 	return e.log.With().Str("node", nr.node.ID).Int("attempt", nr.attempt).Logger()
 }
 
-func (e *Engine) start(ctx context.Context, nr *nodeRun, results chan<- finished) {
+func (e *Engine) start(ctx context.Context, nr *nodeRun) {
 	log := e.nodeLog(nr)
 	// Node contexts ignore the run context's cancellation: the main loop
 	// cancels each node itself so that canceling, killing, and marking
@@ -383,10 +608,12 @@ func (e *Engine) start(ctx context.Context, nr *nodeRun, results chan<- finished
 	nr.kill = make(chan struct{})
 	nr.state = events.Running
 	nr.started = time.Now()
-	e.publishNode(nr, "", runner.Result{ExitCode: 0, Signal: "", Reason: "", Err: nil})
+	nr.log = e.opts.Run.RelPath(e.opts.Run.AttemptLogPath(nr.node.ID, nr.attempt))
+	e.publishNode(nr)
 
+	id, attempt := nr.node.ID, nr.attempt
 	spec := runner.Spec{
-		Node:        nr.node.ID,
+		Node:        id,
 		Shell:       nr.node.Shell,
 		Script:      nr.node.Run,
 		Dir:         filepath.Join(e.opts.Workflow.Root, nr.node.Dir),
@@ -397,19 +624,25 @@ func (e *Engine) start(ctx context.Context, nr *nodeRun, results chan<- finished
 		Output:      nil,
 		Interactive: nr.node.Interactive,
 		Kill:        nr.kill,
-		Log:         log,
+		Started: func(pgid int) {
+			select {
+			case e.procs <- startedProc{id: id, attempt: attempt, pgid: pgid}:
+			case <-ctx.Done():
+			}
+		},
+		Log: log,
 	}
 	log.Info().Str("dir", spec.Dir).Bool("interactive", spec.Interactive).Msg("node started")
 
-	logFile, err := e.opts.Run.CreateAttemptLog(nr.node.ID, nr.attempt)
+	results := e.results
+	logFile, err := e.opts.Run.CreateAttemptLog(id, attempt)
 	if err != nil {
 		cancel()
 		res := runner.Result{ExitCode: -1, Signal: "", Reason: runner.ReasonStartErr, Err: fmt.Errorf("create log file: %w", err)}
-		go func() { results <- finished{id: nr.node.ID, result: res} }()
+		go func() { results <- finished{id: id, result: res} }()
 		return
 	}
 
-	id := nr.node.ID
 	if nr.node.Interactive {
 		go func() {
 			defer cancel()
@@ -458,7 +691,7 @@ func (e *Engine) runInteractive(ctx context.Context, spec runner.Spec, logFile *
 }
 
 func (e *Engine) env(nr *nodeRun) []string {
-	env := make([]string, 0, len(e.opts.Env)+len(nr.node.Env)+5)
+	env := make([]string, 0, len(e.opts.Env)+len(nr.node.Env)+6)
 	env = append(env, e.opts.Env...)
 	for k, v := range nr.node.Env {
 		env = append(env, k+"="+v)
@@ -476,6 +709,7 @@ func (e *Engine) env(nr *nodeRun) []string {
 func (e *Engine) finish(id string, res runner.Result) {
 	nr := e.nodes[id]
 	nr.finished = time.Now()
+	nr.pgid = 0
 	switch {
 	case res.Success():
 		nr.state = events.Succeeded
@@ -491,12 +725,19 @@ func (e *Engine) finish(id string, res runner.Result) {
 	log.Info().Str("state", string(nr.state)).Str("reason", string(res.Reason)).Int("exit_code", res.ExitCode).
 		Str("signal", res.Signal).AnErr("error", res.Err).Dur("duration_ms", nr.finished.Sub(nr.started)).Msg("node finished")
 
-	e.writeRecord(nr, res, e.opts.Run.AttemptLogPath(id, nr.attempt))
 	errText := ""
 	if nr.state != events.Succeeded {
 		errText = describe(res)
 	}
-	e.publishNode(nr, errText, res)
+	e.end(nr, res, errText, nr.log)
+}
+
+// end records a node's terminal state: the attempt record on disk, then
+// the event.
+func (e *Engine) end(nr *nodeRun, res runner.Result, errText, logPath string) {
+	nr.exitCode, nr.reason, nr.errText, nr.log = res.ExitCode, string(res.Reason), errText, logPath
+	e.writeRecord(nr, res)
+	e.publishNode(nr)
 }
 
 // describe renders a result for humans: "exit code 3", "timed out", ...
@@ -522,14 +763,10 @@ func describe(res runner.Result) string {
 	return fmt.Sprintf("exit code %d", res.ExitCode)
 }
 
-func (e *Engine) writeRecord(nr *nodeRun, res runner.Result, logPath string) {
+func (e *Engine) writeRecord(nr *nodeRun, res runner.Result) {
 	errText := ""
 	if res.Err != nil {
 		errText = res.Err.Error()
-	}
-	rel := ""
-	if logPath != "" {
-		rel = e.opts.Run.RelPath(logPath)
 	}
 	rec := store.AttemptRecord{
 		Node:        nr.node.ID,
@@ -545,7 +782,7 @@ func (e *Engine) writeRecord(nr *nodeRun, res runner.Result, logPath string) {
 		Error:       errText,
 		Started:     nr.started,
 		Finished:    nr.finished,
-		Log:         rel,
+		Log:         nr.log,
 	}
 	if err := e.opts.Run.WriteAttemptRecord(rec); err != nil {
 		log := e.nodeLog(nr)
@@ -553,22 +790,45 @@ func (e *Engine) writeRecord(nr *nodeRun, res runner.Result, logPath string) {
 	}
 }
 
-func (e *Engine) publishNode(nr *nodeRun, errText string, res runner.Result) {
+func (e *Engine) publishNode(nr *nodeRun) {
+	e.dirty = true
 	exitCode := 0
 	if nr.state.Terminal() {
-		exitCode = res.ExitCode
+		exitCode = nr.exitCode
 	}
 	e.publish(events.NodeChanged{
 		Node:     nr.node.ID,
 		State:    nr.state,
 		Attempt:  nr.attempt,
 		ExitCode: exitCode,
-		Err:      errText,
-		Reason:   string(res.Reason),
+		Err:      nr.errText,
+		Reason:   nr.reason,
 		Started:  nr.started,
 		Finished: nr.finished,
 		At:       time.Now(),
 	})
+}
+
+// persist writes state.json when a node changed since the last write. The
+// engine loop calls it before it waits for anything, so a weft killed at
+// any point leaves state.json at most one scheduling step behind, and
+// never ahead of what happened.
+func (e *Engine) persist() {
+	if e.state == nil || !e.dirty {
+		return
+	}
+	for id, nr := range e.nodes {
+		e.state.Nodes[id] = store.NodeState{
+			State: nr.state, Attempt: nr.attempt, ExitCode: nr.exitCode, Reason: nr.reason, Error: nr.errText,
+			Started: nr.started, Finished: nr.finished, Log: nr.log, PGID: nr.pgid,
+		}
+	}
+	e.state.Updated = time.Now()
+	if err := e.opts.Run.WriteState(e.state); err != nil {
+		e.log.Error().Err(err).Msg("write state; a resume of this run may rerun nodes that already succeeded")
+		return
+	}
+	e.dirty = false
 }
 
 func (e *Engine) publish(ev events.Event) {

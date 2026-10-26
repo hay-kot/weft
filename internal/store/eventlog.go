@@ -3,7 +3,9 @@ package store
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"time"
 
@@ -41,7 +43,15 @@ func EventType(e events.Event) string {
 // WriteEvents appends every event from ch to the run's events.jsonl until ch
 // closes. Node output is left out: it is already in the per-attempt logs,
 // and copying it would double the disk use and the places secrets can leak.
+// A resumed run appends to the same file, and seq carries on from its last
+// line.
 func (r *Run) WriteEvents(ch <-chan events.Event) error {
+	seq, err := countLines(r.EventsPath())
+	if err != nil {
+		for range ch {
+		}
+		return fmt.Errorf("read event log: %w", err)
+	}
 	f, err := os.OpenFile(r.EventsPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, fileMode)
 	if err != nil {
 		// Drain so the bus never blocks on this subscriber.
@@ -53,7 +63,6 @@ func (r *Run) WriteEvents(ch <-chan events.Event) error {
 	enc := json.NewEncoder(w)
 
 	var firstErr error
-	seq := 0
 	for e := range ch {
 		switch e.(type) {
 		case events.NodeOutput, events.Barrier:
@@ -73,4 +82,22 @@ func (r *Run) WriteEvents(ch <-chan events.Event) error {
 		firstErr = err
 	}
 	return firstErr
+}
+
+func countLines(path string) (int, error) {
+	f, err := os.Open(path) //nolint:gosec // path is inside a run directory
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = f.Close() }()
+	n := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		n++
+	}
+	return n, sc.Err()
 }

@@ -114,7 +114,8 @@ graph live, with the selected node's output under it:
 ```
 
 Icons: `○` pending, a spinner for running, `◆` waiting for the terminal,
-`✓` succeeded, `✗` failed, `⊘` blocked or canceled.
+`✓` succeeded (dim when skipped by a resume), `✗` failed, `⊘` blocked or
+canceled, `·` excluded by `--from` or `--only`.
 
 The selection follows the run (the node that just started, or the first
 failure) until you move it. Keys:
@@ -124,6 +125,8 @@ failure) until you move it. Keys:
 | `h` `j` `k` `l`, arrows | Move the selection on screen |
 | `enter` | Full-screen log of the selected node (`esc` or `q` goes back) |
 | `pgup` `pgdn`, `ctrl+u` `ctrl+d` | Scroll the log; `g` and `G` jump to the top and bottom |
+| `r` | Rerun the selected node, if its needs are satisfied |
+| `R` | Rerun the selected node and everything downstream of it |
 | `f` | Pause or resume following the log's newest lines |
 | `v` | Switch between the horizontal and vertical graph |
 | `ctrl+c` | Cancel the run; again to kill the running nodes |
@@ -134,6 +137,13 @@ In the full-screen log, `j` `k` scroll by a line and `h` `l` scroll
 sideways through long lines. The TUI keeps the last 10,000 lines of each
 node; the node log on disk has all of them, and its path is in the
 full-screen log's title.
+
+`r` and `R` work while the run is going and after it ends. A rerun is a new
+attempt of the node, in the same run directory, and its log in the TUI
+shows the earlier attempt's output above an `── attempt N ──` line. After
+the run ended, a rerun makes it active again, so `ctrl+c` cancels it and
+`q` asks first. `R` leaves a downstream node that is still pending alone
+(it waits for the rerun anyway) and refuses while one is running.
 
 When an interactive node runs, the TUI steps aside and the node gets the
 terminal. The TUI comes back when the node exits. When the run ends, the
@@ -173,6 +183,50 @@ file is the source of truth.
 | `--ui=auto\|tui\|plain` | Output mode. `auto` picks `tui` when stdin and stdout are terminals, `CI` is unset, and `TERM` is not `dumb`; `plain` prints prefixed lines |
 | `--exit-on-end` | Quit the TUI as soon as the run ends |
 | `--concurrency`, `-j` | Override the workflow's `concurrency` |
+| `--resume` | Carry on the latest run: skip nodes that succeeded, run the rest again |
+| `--from <node>` | Run that node and everything downstream of it |
+| `--only <a,b>` | Run only those nodes (comma-separated, or repeat the flag) |
+| `--force` | With `--resume`, `--from`, or `--only`: go ahead even if the workflow file or git HEAD changed |
+
+### Resuming a run
+
+When a run fails late, fix the cause and resume it instead of starting
+over:
+
+```bash
+weft run deploy            # deploy fails after release cut a tag
+weft run deploy --resume   # release is skipped; deploy and tofu-apply run again
+```
+
+`--resume` carries on the latest run in the same run directory. Nodes that
+succeeded are skipped, and every other node runs again as its next attempt
+(`WEFT_ATTEMPT` goes up, and the logs of earlier attempts stay). That
+includes a node the run shows as still running because weft itself was
+killed. If that node's processes are still alive, weft refuses until you
+stop them (it prints the process group), since a second copy of a release
+must not start next to the first. When every node already succeeded,
+there is nothing to resume, and weft says so and exits 0.
+
+`--from <node>` reruns a node and everything downstream of it. `--only
+a,b` runs exactly the nodes you name. Needs they leave out are taken from
+the latest run and must have succeeded there; otherwise weft names the
+need and stops. When a selection needs nothing from the latest run, it is a
+new run, and the nodes it leaves out show as `excluded` and don't fail it.
+For example, CI without a terminal can skip the interactive step:
+
+```bash
+weft run deploy --only guard,go-check,ui-check,release,deploy
+```
+
+A resume (or `--from`/`--only` that takes results from the latest run)
+first checks that the workflow file and git HEAD are what they were when
+the run last started. Resuming a release after HEAD moved is how the wrong
+commit ships. If either changed, the TUI asks before it starts, and plain
+mode refuses unless you pass `--force`. Reruns from the TUI make the same
+check and ask the same way.
+
+Only one weft at a time can use a run directory. A second `--resume` while
+the first is still going fails with the other weft's PID.
 
 Global flags: `--log-level` (or `WEFT_LOG_LEVEL`), `--no-color` (or
 `NO_COLOR`), `--json` (for `validate`).
@@ -182,16 +236,27 @@ Global flags: `--log-level` (or `WEFT_LOG_LEVEL`), `--no-color` (or
 Each run gets a sortable ID such as `20261025T191200-a3f9` and a directory
 at `.weft/runs/<workflow>/<run-id>/`. The TUI shows both in its header, and
 weft prints them to stderr when the run ends (and when it starts, in plain
-mode). The newest 20 runs per workflow are kept. On first use weft
+mode). The newest 20 runs per workflow are kept; a run another weft is using is
+never pruned. On first use weft
 writes `.weft/.gitignore` so runs stay out of git.
 
 ```text
 .weft/runs/deploy/20261025T191200-a3f9/
   weft.log                 weft's own JSON log; every line has run_id
+  state.json               node states, attempts, and logs; history of starts
+  lock                     held by the weft using the run
   events.jsonl             every state change, in order, with timestamps
   nodes/<node>/<n>.log     output of attempt n (stdout and stderr together)
   nodes/<node>/<n>.json    attempt n: command, dir, times, exit code, signal, reason
 ```
+
+A resume appends to the same `weft.log` and `events.jsonl`. `state.json`
+is rewritten after every state change, atomically and synced to disk, so a
+weft that dies at any point leaves it at most one step behind. Its
+`history` lists the first run, each resume, `--from`, `--only`, and TUI
+rerun, with the git HEAD and workflow hash at that moment and whether the
+user went ahead past a change. An attempt that weft lost track of gets an
+`<n>.json` record with reason `abandoned` when the run is resumed.
 
 Run with `--log-level=debug` to have `weft.log` explain each scheduling
 decision and every signal sent. Log files are created with mode 0600 because

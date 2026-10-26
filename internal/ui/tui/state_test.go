@@ -151,7 +151,7 @@ func TestAutoSelect(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rs := newRunState(deployWorkflow(t), testRun(), 10)
+			rs := newRunState(deployWorkflow(t), testRun(), nil, 10)
 			for id, st := range tt.states {
 				rs.nodes[id].State = st
 			}
@@ -161,7 +161,7 @@ func TestAutoSelect(t *testing.T) {
 }
 
 func TestRunStateElapsedAndCounts(t *testing.T) {
-	rs := newRunState(deployWorkflow(t), testRun(), 10)
+	rs := newRunState(deployWorkflow(t), testRun(), nil, 10)
 	assert.Equal(t, time.Duration(0), rs.elapsed(t0), "not started")
 
 	rs.started = t0

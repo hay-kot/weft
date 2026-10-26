@@ -10,6 +10,8 @@ type KeyMap struct {
 	Down     key.Binding
 	Open     key.Binding
 	Close    key.Binding
+	Rerun    key.Binding
+	RerunAll key.Binding
 	Follow   key.Binding
 	Layout   key.Binding
 	PageUp   key.Binding
@@ -33,6 +35,8 @@ func DefaultKeyMap() KeyMap {
 		Down:     key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "down")),
 		Open:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "log")),
 		Close:    key.NewBinding(key.WithKeys("esc", "q", "enter"), key.WithHelp("esc/q", "back")),
+		Rerun:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rerun")),
+		RerunAll: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rerun+downstream")),
 		Follow:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
 		Layout:   key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "layout")),
 		PageUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+u", "b"), key.WithHelp("pgup/ctrl+u", "page up")),
@@ -55,7 +59,7 @@ var selectHelp = key.NewBinding(key.WithKeys("h", "j", "k", "l"), key.WithHelp("
 func (k KeyMap) mainHelp(running bool) []key.Binding {
 	cancel := k.Cancel
 	cancel.SetEnabled(running)
-	return []key.Binding{selectHelp, k.Open, cancel, k.Quit, k.Help, k.Follow, k.Layout}
+	return []key.Binding{selectHelp, k.Open, cancel, k.Quit, k.Help, k.Rerun, k.RerunAll, k.Follow, k.Layout}
 }
 
 // mainFullHelp is the expanded help for the graph view.
@@ -63,7 +67,7 @@ func (k KeyMap) mainFullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.Open, k.Layout, k.Follow, k.PageUp, k.PageDown},
-		{k.Cancel, k.Quit, k.Help},
+		{k.Rerun, k.RerunAll, k.Cancel, k.Quit, k.Help},
 	}
 }
 

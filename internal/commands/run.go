@@ -20,6 +20,7 @@ import (
 
 	"github.com/hay-kot/weft/internal/engine"
 	"github.com/hay-kot/weft/internal/events"
+	"github.com/hay-kot/weft/internal/plan"
 	"github.com/hay-kot/weft/internal/runner"
 	"github.com/hay-kot/weft/internal/store"
 	"github.com/hay-kot/weft/internal/term"
@@ -41,11 +42,15 @@ type RunCmd struct {
 	ui          string
 	concurrency int
 	exitOnEnd   bool
+	sel         selection
 }
 
 // NewRunCmd creates a new run command.
 func NewRunCmd(flags *Flags) *RunCmd {
-	return &RunCmd{flags: flags, ui: uiAuto, concurrency: 0, exitOnEnd: false}
+	return &RunCmd{
+		flags: flags, ui: uiAuto, concurrency: 0, exitOnEnd: false,
+		sel: selection{resume: false, from: "", only: nil, force: false},
+	}
 }
 
 // Register adds the run command to the application.
@@ -72,7 +77,21 @@ plain mode).
 
 Ctrl-C cancels the run: running nodes get SIGINT and their kill_timeout
 grace period, then SIGTERM, then SIGKILL. A second Ctrl-C sends SIGKILL at
-once. SIGTERM and SIGHUP cancel the same way.`,
+once. SIGTERM and SIGHUP cancel the same way.
+
+--resume carries on the latest run in its own directory: nodes that
+succeeded are skipped, and the rest run again as a new attempt. --from
+<node> runs that node and everything downstream of it, and --only a,b runs
+exactly those nodes. Both take the results of needs they leave out from the
+latest run, and fail when those needs did not succeed there. A selection
+that needs nothing from the latest run starts a new run instead, where the
+nodes it leaves out show as excluded.
+
+When the workflow file or git HEAD changed since the run being continued
+last started, weft asks first in the TUI and refuses in plain mode unless
+--force is set: resuming a release after HEAD moved is how the wrong commit
+ships. In the TUI, r reruns the selected node and R reruns it with
+everything downstream, during the run or after it ends.`,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "ui",
@@ -92,6 +111,26 @@ once. SIGTERM and SIGHUP cancel the same way.`,
 				Name:        "exit-on-end",
 				Usage:       "quit the TUI as soon as the run ends instead of waiting for q",
 				Destination: &cmd.exitOnEnd,
+			},
+			&cli.BoolFlag{
+				Name:        "resume",
+				Usage:       "carry on the latest run: skip nodes that succeeded and run the rest again",
+				Destination: &cmd.sel.resume,
+			},
+			&cli.StringFlag{
+				Name:        "from",
+				Usage:       "run `NODE` and everything downstream of it, taking its needs from the latest run",
+				Destination: &cmd.sel.from,
+			},
+			&cli.StringSliceFlag{
+				Name:        "only",
+				Usage:       "run only these `NODES` (comma-separated or repeated), taking needs they leave out from the latest run",
+				Destination: &cmd.sel.only,
+			},
+			&cli.BoolFlag{
+				Name:        "force",
+				Usage:       "with --resume, --from, or --only: go ahead even if the workflow file or git HEAD changed since the run last started",
+				Destination: &cmd.sel.force,
 			},
 			&cli.IntFlag{
 				Name:        "concurrency",
@@ -116,6 +155,9 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 	if c.NArg() != 1 {
 		return errors.New("usage: weft run <workflow>")
 	}
+	if err := cmd.sel.validate(); err != nil {
+		return err
+	}
 	wf, err := loadWorkflow(c.Args().First())
 	if err != nil {
 		return err
@@ -125,13 +167,28 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 		return err
 	}
 
-	// Prune before creating so the new run is one of the kept ones.
-	if err := store.Prune(wf.Root, wf.Name, store.KeepRuns-1); err != nil {
-		log.Warn().Err(err).Msg("prune old runs")
+	prep, err := prepare(ctx, wf, cmd.sel, time.Now())
+	if errors.Is(err, errNothingToRun) {
+		_, _ = fmt.Fprintf(os.Stderr, "weft: %v; nothing to resume. Start a new run without --resume.\n", err)
+		return nil
 	}
-	run, err := store.Create(wf.Root, wf.Name, time.Now())
 	if err != nil {
 		return err
+	}
+	defer prep.lock.Release()
+	run := prep.run
+	if len(prep.alive) > 0 && !cmd.sel.force {
+		return aliveError(cmd.sel, run.ID, prep.alive)
+	}
+	confirm := ""
+	if len(prep.drift) > 0 && !cmd.sel.force {
+		if mode != uiTUI {
+			return driftError(cmd.sel, run.ID, prep.drift)
+		}
+		// The header shows the run ID, so the question leaves it out and
+		// keeps the answer keys on screen.
+		confirm = fmt.Sprintf("Since this run last started, %s. y goes ahead, any other key quits.",
+			strings.Join(prep.drift, " and "))
 	}
 
 	logFile, err := run.OpenLog()
@@ -154,7 +211,9 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	runLog.Info().Str("ui", mode).Msg("output mode")
+	runLog.Info().Str("ui", mode).Str("mode", prep.plan.Mode).Strs("selection", prep.plan.Selection).
+		Bool("continue", prep.plan.Continue).Strs("pending", prep.plan.Pending(wf)).Strs("drift", prep.drift).
+		Bool("force", cmd.sel.force).Str("git_head", prep.head).Msg("run planned")
 
 	bus := events.NewBus()
 	var eventLog sync.WaitGroup
@@ -165,19 +224,31 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 		}
 	})
 
-	r := runSession{
-		cmd: cmd, wf: wf, run: run, bus: bus, log: runLog, stderr: stderr,
-		intr: &interrupter{eng: nil, n: atomic.Int32{}},
+	r := &runSession{
+		cmd: cmd, wf: wf, run: run, prep: prep, bus: bus, log: runLog, stderr: stderr,
+		intr:   &interrupter{eng: nil},
+		notice: startNotice(wf, prep.plan, run.ID, cmd.sel),
+		mu:     sync.Mutex{}, baseline: prep.state.Last(),
 	}
 	var summary engine.Summary
 	var uiErr error
 	var abort <-chan struct{}
+	started := true
 	if mode == uiTUI {
-		summary, abort, uiErr = r.tui(ctx)
+		summary, abort, started, uiErr = r.tui(ctx, confirm)
 	} else {
 		summary, abort = r.plain(ctx, &eventLog)
 	}
 	eventLog.Wait()
+
+	if !started {
+		_, _ = fmt.Fprintf(stderr, "weft: run %s left as it was\nweft: run dir %s\n", run.ID, run.Dir)
+		stderr.Close(noticeFlushTimeout, abort)
+		if uiErr != nil {
+			return fmt.Errorf("the TUI failed before the run started: %w", uiErr)
+		}
+		return driftError(cmd.sel, run.ID, prep.drift)
+	}
 
 	counts := summarize(summary)
 	outcome := "succeeded"
@@ -220,13 +291,23 @@ type runSession struct {
 	cmd    *RunCmd
 	wf     *workflow.Workflow
 	run    *store.Run
+	prep   *prepared
 	bus    *events.Bus
 	log    zerolog.Logger
 	stderr *asyncWriter
 	intr   *interrupter
+	// notice describes a resumed or narrowed run, or is empty.
+	notice string
+	eng    *engine.Engine
+
+	// mu guards baseline: what the workflow file and git HEAD were at the
+	// start the user last accepted, which TUI reruns check against.
+	mu       sync.Mutex
+	baseline store.Start
 }
 
-func (r runSession) engine(lender engine.TerminalLender, tty bool) *engine.Engine {
+func (r *runSession) engine(lender engine.TerminalLender, tty, reruns bool) *engine.Engine {
+	p := r.prep.plan
 	eng := engine.New(engine.Options{
 		Workflow:    r.wf,
 		Run:         r.run,
@@ -235,25 +316,47 @@ func (r runSession) engine(lender engine.TerminalLender, tty bool) *engine.Engin
 		Bus:         r.bus,
 		Concurrency: r.cmd.concurrency,
 		Env:         nodeEnv(tty),
+		Plan:        &p,
+		State:       r.prep.state,
+		Reruns:      reruns,
 		Log:         r.log,
 	})
 	r.intr.eng = eng
+	r.eng = eng
 	return eng
 }
 
+// begin records attempts the earlier weft lost track of, right before the
+// engine starts. It only logs a failure: the records are for reading
+// afterwards, and the run itself does not depend on them.
+func (r *runSession) begin() {
+	if lost := r.prep.alive; len(lost) > 0 {
+		r.log.Warn().Int("alive", len(lost)).Msg("going ahead with --force although lost attempts may still be running")
+	}
+	if err := r.prep.recordLost(r.wf); err != nil {
+		r.log.Error().Err(err).Msg("record lost attempts")
+	}
+}
+
 // plain runs with the prefixed-line renderer on stdout.
-func (r runSession) plain(ctx context.Context, eventLog *sync.WaitGroup) (engine.Summary, <-chan struct{}) {
+func (r *runSession) plain(ctx context.Context, eventLog *sync.WaitGroup) (engine.Summary, <-chan struct{}) {
 	stdoutTTY := term.IsTerminal(os.Stdout)
 	color := stdoutTTY && !r.cmd.flags.NoColor
 	_, _ = fmt.Fprintf(r.stderr, "weft: run %s\nweft: run dir %s\n", r.run.ID, r.run.Dir)
+	if r.notice != "" {
+		_, _ = fmt.Fprintf(r.stderr, "weft: %s\n", r.notice)
+	}
+	if r.cmd.sel.force && len(r.prep.drift) > 0 {
+		_, _ = fmt.Fprintf(r.stderr, "weft: going ahead with --force although %s\n", strings.Join(r.prep.drift, " and "))
+	}
 
 	renderer := plain.New(os.Stdout, r.wf, color)
 	renderSub := r.bus.Subscribe(0)
 	var rendering sync.WaitGroup
 	rendering.Go(func() { renderer.Run(renderSub.C) })
 
-	eng := r.engine(plain.Lender{Sub: renderSub}, stdoutTTY)
-	sigs := handleSignals(r.intr, r.log, func(level int, _ os.Signal) {
+	eng := r.engine(plain.Lender{Sub: renderSub}, stdoutTTY, false)
+	sigs := handleSignals(r.intr.Interrupt, r.log, func(level int, _ os.Signal) {
 		if level == 1 {
 			_, _ = fmt.Fprintln(r.stderr, "weft: canceling; running nodes get SIGINT and a grace period. Press Ctrl-C again to kill them now.")
 			return
@@ -261,8 +364,8 @@ func (r runSession) plain(ctx context.Context, eventLog *sync.WaitGroup) (engine
 		_, _ = fmt.Fprintln(r.stderr, "weft: killing running nodes")
 	}, nil)
 	defer sigs.stop()
+	r.begin()
 	summary := eng.Run(ctx)
-	sigs.runEnded()
 	r.bus.Close()
 
 	// Let the renderer and the event log catch up. With stdout paused that
@@ -279,19 +382,32 @@ func (r runSession) plain(ctx context.Context, eventLog *sync.WaitGroup) (engine
 
 // tui runs with the terminal UI. It returns once the user quits and the run
 // is over. If the TUI fails first, the run is canceled and weft waits for
-// it with notices on stderr, where Ctrl-C works as in plain mode.
-func (r runSession) tui(ctx context.Context) (engine.Summary, <-chan struct{}, error) {
+// it with notices on stderr, where Ctrl-C works as in plain mode. With a
+// confirm prompt, the engine starts only once the user accepts it; started
+// reports whether it did.
+func (r *runSession) tui(ctx context.Context, confirm string) (summary engine.Summary, abort <-chan struct{}, started bool, uiErr error) {
+	start := make(chan struct{})
+	var startOnce sync.Once
+	p := r.prep.plan
 	app := tui.NewApp(tui.Options{
 		Workflow:  r.wf,
 		Run:       r.run,
 		ExitOnEnd: r.cmd.exitOnEnd,
 		Interrupt: r.intr.Interrupt,
+		Plan:      &p,
+		Confirm:   confirm,
+		Start:     func() { startOnce.Do(func() { close(start) }) },
+		Rerun:     r.rerun,
+		Notice:    r.notice,
 		Log:       r.log,
 	}, r.bus.Subscribe(0), r.cmd.flags.NoColor)
-	eng := r.engine(app.Lender(), true)
+	eng := r.engine(app.Lender(), true, true)
+	if confirm == "" {
+		startOnce.Do(func() { close(start) })
+	}
 
 	var tuiGone atomic.Bool
-	sigs := handleSignals(r.intr, r.log, func(level int, sig os.Signal) {
+	sigs := handleSignals(r.intr.Interrupt, r.log, func(level int, sig os.Signal) {
 		if !tuiGone.Load() {
 			app.Interrupted(level, sig.String())
 			return
@@ -302,20 +418,42 @@ func (r runSession) tui(ctx context.Context) (engine.Summary, <-chan struct{}, e
 	}, app.Quit)
 	defer sigs.stop()
 
+	appDone := make(chan struct{})
 	result := make(chan engine.Summary, 1)
+	ran := make(chan bool, 1)
 	go func() {
+		select {
+		case <-start:
+		case <-appDone:
+			// The TUI may have accepted just before it quit.
+			select {
+			case <-start:
+			default:
+				ran <- false
+				r.bus.Close()
+				return
+			}
+		}
+		ran <- true
+		r.begin()
 		s := eng.Run(ctx)
-		sigs.runEnded()
 		r.bus.Close()
 		result <- s
 	}()
 
-	uiErr := app.Run()
+	uiErr = app.Run()
 	tuiGone.Store(true)
-	select {
-	case s := <-result:
-		return s, sigs.abort, uiErr
-	default:
+	close(appDone)
+	if !<-ran {
+		return engine.Summary{Success: false, States: nil}, sigs.abort, false, uiErr
+	}
+	// Checked before Close: between passes the run is over, and Run
+	// returns as soon as the engine closes.
+	midRun := eng.Active()
+	// Reruns end with the TUI; Run returns once the current pass is over.
+	eng.Close()
+	if !midRun {
+		return <-result, sigs.abort, true, uiErr
 	}
 	r.log.Error().AnErr("error", uiErr).Msg("TUI exited before the run finished; canceling the run")
 	_, _ = fmt.Fprintf(r.stderr, "weft: the TUI exited before run %s finished; canceling it. Press Ctrl-C again to kill the running nodes now.\n", r.run.ID)
@@ -323,34 +461,56 @@ func (r runSession) tui(ctx context.Context) (engine.Summary, <-chan struct{}, e
 		_, _ = fmt.Fprintf(r.stderr, "weft: TUI error: %v\n", uiErr)
 	}
 	r.intr.cancel()
-	return <-result, sigs.abort, uiErr
+	return <-result, sigs.abort, true, uiErr
 }
 
-// interrupter escalates cancel requests from keys and signals alike: the
-// first cancels the run, every later one kills the running nodes.
+// rerun handles r and R from the TUI. Unless force is set, it refuses with
+// a *plan.DriftError when the workflow file or git HEAD changed since the
+// start the user last accepted, so the TUI can ask first.
+func (r *runSession) rerun(id string, downstream, force bool) error {
+	head := gitHead(context.Background(), r.wf.Root)
+	hash, err := workflow.HashFile(r.wf.Path)
+	if err != nil {
+		// A deleted or unreadable file counts as changed.
+		hash = ""
+	}
+	r.mu.Lock()
+	drift := plan.Drift(r.baseline, hash, head)
+	r.mu.Unlock()
+	if len(drift) > 0 && !force {
+		return &plan.DriftError{RunID: r.run.ID, Reasons: drift}
+	}
+	start := store.Start{
+		At: time.Now(), PID: os.Getpid(), Mode: store.ModeRerun, Nodes: nil,
+		WorkflowHash: r.wf.Hash, GitHead: head, Forced: len(drift) > 0,
+	}
+	if err := r.eng.Rerun(id, downstream, start); err != nil {
+		return err
+	}
+	if len(drift) > 0 {
+		r.log.Warn().Strs("drift", drift).Str("node", id).Msg("rerun confirmed although the workflow or HEAD changed")
+		r.mu.Lock()
+		r.baseline = store.Start{
+			At: start.At, PID: start.PID, Mode: store.ModeRerun, Nodes: nil,
+			WorkflowHash: hash, GitHead: head, Forced: true,
+		}
+		r.mu.Unlock()
+	}
+	return nil
+}
+
+// interrupter forwards cancel requests from keys and signals to the
+// engine, which escalates them per pass.
 type interrupter struct {
 	eng *engine.Engine
-	n   atomic.Int32
 }
 
-// cancel cancels the run unless an interrupt already has, without
-// escalating to a kill.
-func (i *interrupter) cancel() {
-	if i.n.CompareAndSwap(0, 1) {
-		i.eng.Cancel()
-	}
-}
+// cancel cancels the current pass without escalating to a kill.
+func (i *interrupter) cancel() { i.eng.Cancel() }
 
-// Interrupt escalates and returns how many interrupts there have been.
-func (i *interrupter) Interrupt() int {
-	n := int(i.n.Add(1))
-	if n == 1 {
-		i.eng.Cancel()
-	} else {
-		i.eng.Kill()
-	}
-	return n
-}
+// Interrupt escalates and returns the level: 1 cancels, 2 and up kill, and
+// 0 means no pass is active.
+func (i *interrupter) Interrupt() int { return i.eng.Interrupt() }
 
 // outputStallTimeout is how long weft waits at exit for a renderer that has
 // stopped making progress.
@@ -427,25 +587,23 @@ func nodeEnv(tty bool) []string {
 }
 
 type signalHandler struct {
-	// abort closes on the first signal after the run ends.
+	// abort closes on the first signal that arrives while no pass is
+	// active, which means the run is over.
 	abort    chan struct{}
-	ended    chan struct{}
 	stopOnce sync.Once
 	stop     func()
 }
 
-func (h *signalHandler) runEnded() { close(h.ended) }
-
 // handleSignals turns SIGINT, SIGTERM, and SIGHUP into cancel escalations
 // and calls notify after each, so a stuck notice can't hold up the cancel.
-// A signal after the run ends closes abort and calls afterEnd, if set.
-func handleSignals(intr *interrupter, l zerolog.Logger, notify func(level int, sig os.Signal), afterEnd func()) *signalHandler {
+// A signal while no pass is active closes abort and calls afterEnd, if
+// set.
+func handleSignals(interrupt func() int, l zerolog.Logger, notify func(level int, sig os.Signal), afterEnd func()) *signalHandler {
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	done := make(chan struct{})
 	h := &signalHandler{
 		abort:    make(chan struct{}),
-		ended:    make(chan struct{}),
 		stopOnce: sync.Once{},
 		stop:     nil,
 	}
@@ -459,19 +617,18 @@ func handleSignals(intr *interrupter, l zerolog.Logger, notify func(level int, s
 		for {
 			select {
 			case sig := <-ch:
-				select {
-				case <-h.ended:
+				level := interrupt()
+				switch level {
+				case 0:
+					l.Info().Str("signal", sig.String()).Msg("signal received after the run ended")
 					close(h.abort)
 					if afterEnd != nil {
 						afterEnd()
 					}
 					return
-				default:
-				}
-				level := intr.Interrupt()
-				if level == 1 {
+				case 1:
 					l.Info().Str("signal", sig.String()).Msg("signal received; canceling run")
-				} else {
+				default:
 					l.Warn().Str("signal", sig.String()).Msg("another signal received; killing nodes")
 				}
 				notify(level, sig)

@@ -69,6 +69,9 @@ type Spec struct {
 	Interactive bool
 	// Kill, when closed, skips any remaining grace period and sends SIGKILL.
 	Kill <-chan struct{}
+	// Started, when set, is called with the process group ID once the node
+	// has started.
+	Started func(pgid int)
 	// Log receives debug lines about signals sent to the process group.
 	Log zerolog.Logger
 }
@@ -153,6 +156,9 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 		log:    spec.Log.With().Int("pgid", cmd.Process.Pid).Logger(),
 	}
 	p.log.Debug().Msg("process started")
+	if spec.Started != nil {
+		spec.Started(p.pgid)
+	}
 	go func() { p.waitCh <- cmd.Wait() }()
 
 	var timeout <-chan time.Time

@@ -20,12 +20,15 @@ const (
 	Blocked   State = "blocked"
 	Canceled  State = "canceled"
 	Skipped   State = "skipped"
+	// Excluded nodes are outside the selection of --from or --only, or
+	// left out of a resume, and do not run in this attempt.
+	Excluded State = "excluded"
 )
 
 // Terminal reports whether the state is final for the current attempt.
 func (s State) Terminal() bool {
 	switch s {
-	case Succeeded, Failed, Blocked, Canceled, Skipped:
+	case Succeeded, Failed, Blocked, Canceled, Skipped, Excluded:
 		return true
 	default:
 		return false
@@ -40,12 +43,16 @@ type Event interface {
 	isEvent()
 }
 
-// RunStarted is the first event of a run.
+// RunStarted begins each pass of a run. The first pass is followed by a
+// NodeChanged for every node; a later pass starts when a node is rerun
+// after the previous pass finished.
 type RunStarted struct {
-	Workflow string    `json:"workflow"`
-	RunID    string    `json:"run_id"`
-	RunDir   string    `json:"run_dir"`
-	At       time.Time `json:"at"`
+	Workflow string `json:"workflow"`
+	RunID    string `json:"run_id"`
+	RunDir   string `json:"run_dir"`
+	// Pass counts the passes of this weft process, from 1.
+	Pass int       `json:"pass"`
+	At   time.Time `json:"at"`
 }
 
 // NodeChanged reports a node state transition.
@@ -60,7 +67,7 @@ type NodeChanged struct {
 	// timeout or a start error.
 	Err string `json:"error,omitempty"`
 	// Reason is set for terminal states: exit, timeout, canceled, blocked,
-	// start_error, or skipped.
+	// start_error, skipped, or excluded.
 	Reason string `json:"reason,omitempty"`
 	// Started is set once the node starts running.
 	Started  time.Time `json:"started,omitzero"`
@@ -75,7 +82,7 @@ type NodeOutput struct {
 	Line string `json:"line"`
 }
 
-// RunFinished is the last event of a run.
+// RunFinished ends each pass of a run.
 type RunFinished struct {
 	// Success is false when any node failed, was blocked, or was canceled.
 	Success bool      `json:"success"`

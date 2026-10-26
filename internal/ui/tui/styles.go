@@ -79,7 +79,7 @@ func (s Styles) State(st events.State) lipgloss.Style {
 		return s.failed
 	case events.Blocked, events.Canceled:
 		return s.stopped
-	case events.Pending, events.Ready:
+	case events.Pending, events.Ready, events.Excluded:
 		return s.idle
 	default:
 		return s.idle
