@@ -1,6 +1,7 @@
 package events_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -151,4 +152,73 @@ func TestTerminalStates(t *testing.T) {
 	for _, s := range []events.State{events.Pending, events.Ready, events.Running, events.Waiting} {
 		assert.False(t, s.Terminal(), s)
 	}
+}
+
+func TestDropReportSitsWhereTheGapIs(t *testing.T) {
+	bus := events.NewBus()
+	sub := bus.Subscribe(100)
+	for i := 1; i <= 10; i++ {
+		bus.Publish(events.NodeOutput{Node: "n", Line: fmt.Sprintf("%02d-padded-to-20-wide", i)})
+	}
+	bus.Publish(events.NodeChanged{Node: "n", State: events.Succeeded, Attempt: 1, ExitCode: 0, Err: "", Reason: events.ReasonExit, Started: time.Time{}, Finished: time.Time{}, At: time.Time{}})
+	bus.Close()
+
+	// The pump may take lines while they are published, so which lines
+	// are dropped varies. What must hold: every drop report stands exactly
+	// where the lines it counts would have been.
+	got := collect(sub)
+	seen, dropped := 0, 0
+	for _, e := range got[:len(got)-1] {
+		switch e := e.(type) {
+		case events.NodeOutput:
+			var i int
+			_, err := fmt.Sscanf(e.Line, "%02d-", &i)
+			require.NoError(t, err)
+			assert.Equal(t, seen+1, i, "a line follows the line, or the gap, before it")
+			seen = i
+		case events.OutputDropped:
+			assert.Positive(t, e.Lines)
+			seen += e.Lines
+			dropped += e.Lines
+		case events.RunStarted, events.NodeChanged, events.RunFinished, events.Barrier:
+			t.Fatalf("unexpected %T", e)
+		}
+	}
+	assert.Equal(t, 10, seen, "every line is delivered or counted")
+	assert.Positive(t, dropped, "the budget was small enough to drop")
+	assert.IsType(t, events.NodeChanged{}, got[len(got)-1])
+}
+
+func TestEachGapGetsItsOwnReport(t *testing.T) {
+	bus := events.NewBus()
+	sub := bus.Subscribe(10)
+	// Lines that must drop are wider than the whole budget, so they drop
+	// whether or not the pump has taken the line before them yet.
+	bus.Publish(events.NodeOutput{Node: "n", Line: "0123456789"})
+	bus.Publish(events.NodeOutput{Node: "n", Line: "dropped-line"})
+	assert.Equal(t, events.NodeOutput{Node: "n", Line: "0123456789"}, <-sub.C)
+	assert.Equal(t, events.OutputDropped{Node: "n", Lines: 1}, <-sub.C)
+
+	bus.Publish(events.NodeOutput{Node: "n", Line: "second"})
+	bus.Publish(events.NodeOutput{Node: "n", Line: "dropped-too!"})
+	bus.Publish(events.NodeOutput{Node: "n", Line: "and-this-one"})
+	assert.Equal(t, events.NodeOutput{Node: "n", Line: "second"}, <-sub.C)
+	assert.Equal(t, events.OutputDropped{Node: "n", Lines: 2}, <-sub.C)
+	bus.Close()
+	assert.Empty(t, collect(sub))
+}
+
+func TestADropWakesTheReader(t *testing.T) {
+	bus := events.NewBus()
+	sub := bus.Subscribe(5)
+	// With nothing queued the pump is parked; a line over the whole budget
+	// is dropped at once, and its report must not wait for a later event.
+	bus.Publish(events.NodeOutput{Node: "n", Line: "ten bytes!"})
+	select {
+	case e := <-sub.C:
+		assert.Equal(t, events.OutputDropped{Node: "n", Lines: 1}, e)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the drop report was not delivered until another event arrived")
+	}
+	bus.Close()
 }

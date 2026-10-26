@@ -2,6 +2,8 @@ package tui
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -9,6 +11,10 @@ import (
 // logCapacity is how many lines the TUI keeps per node. The attempt log on
 // disk has every line.
 const logCapacity = 10_000
+
+// logBytesCap bounds the bytes kept per node. The engine cuts lines at
+// 64 KiB, so the line count alone could keep hundreds of MB of one node.
+const logBytesCap = 16 << 20
 
 // tabWidth is the tab stop interval used when expanding tabs.
 const tabWidth = 8
@@ -26,14 +32,16 @@ type logLine struct {
 // addressed by absolute index: the n-th line ever appended has index n, so
 // a scroll position stays on the same line while old lines fall off.
 type logBuffer struct {
-	lines []logLine
-	head  int // slot of the oldest line
-	size  int
-	total int // lines ever appended
+	lines    []logLine
+	head     int // slot of the oldest line
+	size     int
+	total    int // lines ever appended
+	bytes    int // bytes of text kept
+	maxBytes int
 }
 
-func newLogBuffer(capacity int) *logBuffer {
-	return &logBuffer{lines: make([]logLine, max(1, capacity)), head: 0, size: 0, total: 0}
+func newLogBuffer(capacity, maxBytes int) *logBuffer {
+	return &logBuffer{lines: make([]logLine, max(1, capacity)), head: 0, size: 0, total: 0, bytes: 0, maxBytes: maxBytes}
 }
 
 func (b *logBuffer) append(l logLine) {
@@ -41,10 +49,22 @@ func (b *logBuffer) append(l logLine) {
 		b.lines[(b.head+b.size)%len(b.lines)] = l
 		b.size++
 	} else {
+		b.bytes -= len(b.lines[b.head].Text)
 		b.lines[b.head] = l
 		b.head = (b.head + 1) % len(b.lines)
 	}
+	b.bytes += len(l.Text)
 	b.total++
+	for b.bytes > b.maxBytes && b.size > 1 {
+		b.dropOldest()
+	}
+}
+
+func (b *logBuffer) dropOldest() {
+	b.bytes -= len(b.lines[b.head].Text)
+	b.lines[b.head] = logLine{Text: "", Notice: false}
+	b.head = (b.head + 1) % len(b.lines)
+	b.size--
 }
 
 // first returns the absolute index of the oldest line kept.
@@ -101,11 +121,30 @@ func sanitize(line string) string {
 			pad := tabWidth - col%tabWidth
 			b.WriteString(strings.Repeat(" ", pad))
 			col += pad
-		case isSGR(seq):
+		case isSGR(seq), joinsText(seq):
 			b.WriteString(seq)
 		}
 	}
 	return b.String()
+}
+
+// joinsText reports whether a zero-width sequence is part of the text
+// rather than a control: a combining mark, a joiner, or a variation
+// selector. Dropping those would turn é into e and split emoji sequences.
+// Other format characters, such as bidi overrides, stay out.
+func joinsText(seq string) bool {
+	r, _ := utf8.DecodeRuneInString(seq)
+	switch {
+	case r == utf8.RuneError:
+		return false
+	case unicode.Is(unicode.M, r):
+		return true
+	case r == '‌', r == '‍':
+		return true
+	case r >= '︀' && r <= '️', r >= 0xe0100 && r <= 0xe01ef:
+		return true
+	}
+	return false
 }
 
 // lastSegment returns the text after the last carriage return that is
@@ -135,16 +174,11 @@ func plainASCII(s string) bool {
 // isSGR reports whether seq is a CSI "m" sequence with only numeric
 // parameters, such as "\x1b[1;31m".
 func isSGR(seq string) bool {
-	var params string
-	switch {
-	case strings.HasPrefix(seq, "\x1b["):
-		params = seq[2:]
-	case strings.HasPrefix(seq, "\u009b"):
-		params = seq[len("\u009b"):]
-	default:
+	params, ok := strings.CutPrefix(seq, "\x1b[")
+	if !ok {
 		return false
 	}
-	params, ok := strings.CutSuffix(params, "m")
+	params, ok = strings.CutSuffix(params, "m")
 	if !ok {
 		return false
 	}

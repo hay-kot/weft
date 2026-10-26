@@ -296,3 +296,111 @@ func TestRunContextStopsReruns(t *testing.T) {
 	err := h.eng.Rerun("a", false, emptyStart())
 	require.ErrorIs(t, err, engine.ErrClosed)
 }
+
+func TestPersistDropsNodesTheWorkflowLost(t *testing.T) {
+	h := newHarnessWith(t, deployYAML, nil, func(o *engine.Options) {
+		prior := deployFailedState(o.Run)
+		// A node removed from the workflow since, left running by a dead weft.
+		prior.Nodes["gone"] = nodeState(events.Running, 2)
+		p := plan.Resume(o.Workflow, prior)
+		o.Plan = &p
+		o.State = prior.Clone()
+		o.State.History = []store.Start{emptyStart()}
+	})
+	s := h.runToEnd(t)
+	assert.True(t, s.Success)
+
+	st, err := h.run.LoadState()
+	require.NoError(t, err)
+	assert.NotContains(t, st.Nodes, "gone", "a removed node must not keep the run interrupted for good")
+	assert.Len(t, st.Nodes, len(h.wf.Nodes))
+}
+
+const readyDependentYAML = `
+concurrency: 1
+nodes:
+  a:
+    run: a
+  x:
+    run: x
+  b:
+    needs: [a]
+    run: b
+`
+
+// With one slot: a runs and succeeds, x takes the slot, and b is ready
+// behind it. A rerun of a that fails must keep b from running on the old
+// result.
+func TestRerunPutsAReadyDependentBackToPending(t *testing.T) {
+	gate := make(chan struct{})
+	h := newHarnessWith(t, readyDependentYAML, map[string]behavior{"x": gated(gate)}, func(*engine.Options) {})
+	h.fake.perAttempt["a"] = map[int]behavior{2: fail()}
+	done := make(chan engine.Summary)
+	go func() { done <- h.eng.Run(t.Context()) }()
+
+	h.waitEvent(t, func(e events.Event) bool {
+		nc, ok := e.(events.NodeChanged)
+		return ok && nc.Node == "b" && nc.State == events.Ready
+	})
+	require.NoError(t, h.eng.Rerun("a", false, emptyStart()))
+	h.waitEvent(t, func(e events.Event) bool {
+		nc, ok := e.(events.NodeChanged)
+		return ok && nc.Node == "a" && nc.State == events.Pending && nc.Attempt == 2
+	})
+	close(gate)
+	s := <-done
+	h.closeBus()
+	<-h.done
+
+	assert.Equal(t, []string{"a", "x", "a"}, h.fake.started, "b never ran against the old result")
+	assert.Equal(t, events.Failed, s.States["a"])
+	assert.Equal(t, events.Blocked, s.States["b"])
+	assert.Equal(t, 1, lastChange(h.snapshot(), "b").Attempt, "nothing of b ran, so its attempt stays")
+	assert.Equal(t, []events.State{events.Pending, events.Ready, events.Pending, events.Blocked}, h.transitions("b"))
+}
+
+func TestSkippedNodeKeptAfterASoftFailureSaysSo(t *testing.T) {
+	const yml = `
+nodes:
+  lint:
+    run: lint
+    continue_on_error: true
+  build:
+    needs: [lint]
+    run: build
+`
+	h := newHarnessWith(t, yml, nil, func(o *engine.Options) {
+		prior := store.NewState(o.Run, "", time.Now())
+		failed := nodeState(events.Failed, 1)
+		failed.ExitCode = 1
+		prior.Nodes["lint"] = failed
+		prior.Nodes["build"] = nodeState(events.Succeeded, 1)
+		p, err := plan.Only(o.Workflow, prior, []string{"build"})
+		require.NoError(t, err)
+		o.Plan = &p
+	})
+	s := h.runToEnd(t)
+	assert.True(t, s.Success)
+	assert.Equal(t, []string{"build"}, h.fake.started)
+
+	lint := lastChange(h.events, "lint")
+	assert.Equal(t, events.Skipped, lint.State)
+	assert.Equal(t, events.ReasonSkipped, lint.Reason)
+	assert.Equal(t, "failed in an earlier attempt; continue_on_error kept its result", lint.Err)
+	assert.Equal(t, 1, lint.ExitCode)
+
+	// On the next continuation the prior is the skipped node itself; the
+	// exit code keeps the note alive.
+	h2 := newHarnessWith(t, yml, nil, func(o *engine.Options) {
+		prior := store.NewState(o.Run, "", time.Now())
+		kept := nodeState(events.Skipped, 1)
+		kept.ExitCode = 1
+		prior.Nodes["lint"] = kept
+		prior.Nodes["build"] = nodeState(events.Succeeded, 2)
+		p, err := plan.Only(o.Workflow, prior, []string{"build"})
+		require.NoError(t, err)
+		o.Plan = &p
+	})
+	h2.runToEnd(t)
+	assert.Equal(t, "failed in an earlier attempt; continue_on_error kept its result", lastChange(h2.events, "lint").Err)
+}

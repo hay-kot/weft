@@ -318,3 +318,56 @@ func TestGoldenResumed(t *testing.T) {
 		tickMsg{at: at(31)})
 	golden.RequireEqual(t, screen(m))
 }
+
+func TestAcceptedRerunMakesTheRunActiveAtOnce(t *testing.T) {
+	fr := &fakeRerun{calls: nil, errFor: nil}
+	m := newRerunModel(t, fr)
+	m = selectDeploy(t, send(t, m, checksPassed(), deployFailed()))
+	require.True(t, m.rs.done)
+
+	m, cmd := update(t, m, press("r"))
+	m = send(t, m, runCmd(cmd)...)
+	assert.False(t, m.runOver(), "the engine had the new pass before it answered")
+	m, cmd = update(t, m, press("q"))
+	assert.False(t, hasQuit(runCmd(cmd)), "q asks instead of quitting under a pass that has just begun")
+	assert.Equal(t, askQuit, m.ask.kind)
+
+	m = send(t, m, press("n"), ev(pass(2, 10)))
+	assert.False(t, m.rerunPending, "the pass's own events take over")
+	assert.False(t, m.rs.done)
+}
+
+func TestCtrlCOnlyClosesTheRerunQuestionAfterTheRun(t *testing.T) {
+	fr := &fakeRerun{calls: nil, errFor: func(rerunCall) error {
+		return &plan.DriftError{RunID: testRun().ID, Reasons: []string{"the workflow file changed"}}
+	}}
+	m := newRerunModel(t, fr)
+	m = selectDeploy(t, send(t, m, checksPassed(), deployFailed()))
+	m, cmd := update(t, m, press("r"))
+	m = send(t, m, runCmd(cmd)...)
+	require.Equal(t, askRerun, m.ask.kind)
+
+	m, cmd = update(t, m, press("ctrl+c"))
+	assert.Nil(t, m.dialog)
+	assert.Equal(t, askNone, m.ask.kind)
+	assert.False(t, hasQuit(runCmd(cmd)), "backing out of the question keeps the TUI open")
+	assert.Equal(t, "rerun of deploy skipped", m.footer.notice)
+}
+
+func TestRerunDuringThePassDoesNotHoldTheRunOpen(t *testing.T) {
+	fr := &fakeRerun{calls: nil, errFor: nil}
+	m := newRerunModel(t, fr)
+	m = send(t, m, checksPassed(), press("h"), press("h"))
+	require.Equal(t, nGuard, m.graph.selected)
+
+	m, cmd := update(t, m, press("r"))
+	// The pass ends before the engine's reply reaches the TUI.
+	m = send(t, m, deployFailed())
+	require.True(t, m.rs.done)
+	m = send(t, m, runCmd(cmd)...)
+	require.Equal(t, []rerunCall{{node: nGuard, downstream: false, force: false}}, fr.calls)
+	assert.False(t, m.rerunPending, "a rerun that joined the going pass gets no RunStarted of its own")
+
+	_, cmd = update(t, m, press("q"))
+	assert.True(t, hasQuit(runCmd(cmd)), "q quits at once when the pass is over")
+}

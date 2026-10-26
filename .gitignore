@@ -21,5 +21,8 @@
 go.work
 dist/
 
+# a bare `go build` in the repo root
+/weft
+
 # weft runs created by the fixture and smoke tests
 testdata/workflows/.weft/

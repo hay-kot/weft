@@ -118,7 +118,11 @@ func (r *Renderer) state(e events.NodeChanged) {
 	case events.Canceled:
 		r.line(e.Node, "⊘", sgrYel, e.Err+dur)
 	case events.Skipped:
-		r.line(e.Node, "✓", sgrDim, "skipped: succeeded in an earlier attempt")
+		why := "succeeded in an earlier attempt"
+		if e.Err != "" {
+			why = e.Err
+		}
+		r.line(e.Node, "✓", sgrDim, "skipped: "+why)
 	case events.Excluded:
 		r.line(e.Node, "·", sgrDim, "excluded: not selected for this run")
 	case events.Pending, events.Ready:

@@ -334,3 +334,31 @@ func TestStartedReportsProcessGroup(t *testing.T) {
 	require.True(t, res.Success())
 	assert.Equal(t, strings.TrimSpace(out.String()), strconv.Itoa(pgid), "the shell leads its own group")
 }
+
+func TestMissingDirIsAStartError(t *testing.T) {
+	t.Parallel()
+
+	out := newBuf()
+	s := spec(t, "echo never", out)
+	s.Dir = filepath.Join(t.TempDir(), "nope")
+	res := runner.Process{}.Run(t.Context(), s)
+	assert.Equal(t, runner.ReasonStartErr, res.Reason)
+	require.ErrorContains(t, res.Err, "working directory "+s.Dir)
+	assert.Empty(t, out.String())
+}
+
+func TestGroupLeftBehindIsLogged(t *testing.T) {
+	t.Parallel()
+
+	var logBuf syncBuffer
+	out := newBuf()
+	s := spec(t, "sleep 30 >/dev/null 2>&1 & echo started", out)
+	s.Log = zerolog.New(&logBuf)
+	var pgid int
+	s.Started = func(p int) { pgid = p }
+	res := runner.Process{}.Run(t.Context(), s)
+	defer func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) }()
+
+	assert.True(t, res.Success())
+	assert.Contains(t, logBuf.String(), "still running in its group")
+}

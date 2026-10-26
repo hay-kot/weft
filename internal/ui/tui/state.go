@@ -63,7 +63,7 @@ func newRunState(wf *workflow.Workflow, run *store.Run, p *plan.Plan, logCap int
 			}
 		}
 		rs.nodes[n.ID] = st
-		rs.logs[n.ID] = newLogBuffer(logCap)
+		rs.logs[n.ID] = newLogBuffer(logCap, logBytesCap)
 	}
 	return rs
 }

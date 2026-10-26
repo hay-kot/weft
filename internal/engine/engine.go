@@ -188,6 +188,13 @@ func New(opts Options) *Engine {
 			if pn.State == events.Excluded {
 				nr.reason = events.ReasonExcluded
 			}
+			// A skipped node usually succeeded; one kept after a failure
+			// with continue_on_error says so, since its dependents ran on
+			// that result. The note carries across continuations through
+			// the exit code, as the state is already skipped by then.
+			if pn.State == events.Skipped && plan.PriorFailed(pn.Prior) {
+				nr.errText = "failed in an earlier attempt; continue_on_error kept its result"
+			}
 		default:
 			nr.state = events.Pending
 		}
@@ -482,10 +489,30 @@ func (e *Engine) applyRerun(req rerunRequest, canceling bool) error {
 		nr.exitCode, nr.reason, nr.errText, nr.log, nr.pgid = 0, "", "", "", 0
 		e.publishNode(nr)
 	}
+	// A dependent that turned ready on the old result, and only waits for
+	// a slot, would start beside or after the new attempt whatever its
+	// outcome. It goes back to pending and waits for the rerun like the
+	// rest. Nothing of it ran, so its attempt stays.
+	for _, nr := range e.ordered() {
+		if (nr.state == events.Ready || nr.state == events.Waiting) && !e.needsSatisfied(nr) {
+			e.log.Debug().Str("node", nr.node.ID).Str("from", string(nr.state)).Msg("node back to pending: a need is being rerun")
+			nr.state = events.Pending
+			e.publishNode(nr)
+		}
+	}
 	if e.state != nil {
 		e.state.History = append(e.state.History, req.start)
 	}
 	return nil
+}
+
+func (e *Engine) needsSatisfied(nr *nodeRun) bool {
+	for _, id := range nr.node.Needs {
+		if need := e.nodes[id]; !plan.Satisfies(need.node, need.state) {
+			return false
+		}
+	}
+	return true
 }
 
 // applyCancel stops the node of a CancelNode request. The next scheduling
@@ -916,12 +943,17 @@ func (e *Engine) persist() {
 	if e.state == nil || !e.dirty {
 		return
 	}
+	// Built afresh rather than updated in place: a node the workflow no
+	// longer has would otherwise stay in state.json for good, and one left
+	// "running" by a dead weft would keep the run interrupted forever.
+	nodes := make(map[string]store.NodeState, len(e.nodes))
 	for id, nr := range e.nodes {
-		e.state.Nodes[id] = store.NodeState{
+		nodes[id] = store.NodeState{
 			State: nr.state, Attempt: nr.attempt, ExitCode: nr.exitCode, Reason: nr.reason, Error: nr.errText,
 			Started: nr.started, Finished: nr.finished, Log: nr.log, PGID: nr.pgid,
 		}
 	}
+	e.state.Nodes = nodes
 	e.state.Updated = time.Now()
 	if err := e.opts.Run.WriteState(e.state); err != nil {
 		e.log.Error().Err(err).Msg("write state; a resume of this run may rerun nodes that already succeeded")

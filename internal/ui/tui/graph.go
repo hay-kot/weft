@@ -263,6 +263,17 @@ func (p graphPane) classify(x, y int, gl layout.Glyph, rs *runState, active map[
 	return glyphClass{kind: glyphBlank, state: "", selected: false}
 }
 
+// render styles one run of glyphs. The selected label is marked with one
+// SGR sequence around the whole run rather than a lipgloss style: lipgloss
+// underlines rune by rune, which splits grapheme clusters (an emoji family,
+// e plus a combining accent) and makes the row wider than the label.
+func (c glyphClass) render(s Styles, text string) string {
+	if c.kind == glyphLabel && c.selected {
+		return selectedOn + text + selectedOff
+	}
+	return c.style(s).Render(text)
+}
+
 func (c glyphClass) style(s Styles) lipgloss.Style {
 	var st lipgloss.Style
 	switch c.kind {
@@ -273,10 +284,8 @@ func (c glyphClass) style(s Styles) lipgloss.Style {
 	case glyphIcon:
 		st = s.State(c.state)
 	case glyphLabel:
-		switch {
-		case c.selected:
-			st = s.Selected
-		case c.state == events.Pending || c.state == events.Ready:
+		switch c.state {
+		case events.Pending, events.Ready:
 			st = s.Dim
 		default:
 			st = lipgloss.NewStyle()
@@ -304,7 +313,7 @@ func (p graphPane) View(rs *runState, s Styles, now time.Time) string {
 		cur := glyphClass{kind: glyphBlank, state: "", selected: false}
 		flush := func() {
 			if run.Len() > 0 {
-				line.WriteString(cur.style(s).Render(run.String()))
+				line.WriteString(cur.render(s, run.String()))
 				run.Reset()
 			}
 		}

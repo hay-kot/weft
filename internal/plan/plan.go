@@ -83,6 +83,24 @@ func succeeded(s events.State) bool {
 	return s == events.Succeeded || s == events.Skipped
 }
 
+// PriorFailed reports whether an earlier state is a failure, counting a
+// skipped node that kept a failed attempt as one. A skip carries a soft
+// failure forward from one continuation to the next; the exit code shows
+// it, and so does the note the engine leaves in Error, which a skip of a
+// success never has (a timed-out node can exit 0 on its SIGINT).
+func PriorFailed(ps store.NodeState) bool {
+	return ps.State == events.Failed || (ps.State == events.Skipped && (ps.ExitCode != 0 || ps.Error != ""))
+}
+
+// outcome is a node's earlier state as the engine judged it, with a kept
+// soft failure read back as the failure it was.
+func outcome(ps store.NodeState) events.State {
+	if PriorFailed(ps) {
+		return events.Failed
+	}
+	return ps.State
+}
+
 func emptyNodeState() store.NodeState {
 	return store.NodeState{
 		State: "", Attempt: 0, ExitCode: 0, Reason: "", Error: "",
@@ -121,15 +139,21 @@ func Fresh(wf *workflow.Workflow) Plan {
 // succeeded are skipped and the rest run again. A node the earlier state
 // shows as running did not finish as far as weft knows (weft was killed),
 // so it runs again too. Nodes the workflow gained since then run as new.
+// Nodes the last start left out with --from or --only stay out: a resume
+// never runs something the user chose not to run, the way it never runs
+// against a moved HEAD without being asked.
 func Resume(wf *workflow.Workflow, prior *store.State) Plan {
 	p := Plan{Mode: store.ModeResume, Selection: nil, Continue: true, Nodes: make(map[string]Node, len(wf.Nodes))}
 	for _, n := range wf.Nodes {
 		ps, ok := prior.Nodes[n.ID]
-		if !ok {
+		switch {
+		case !ok:
 			ps = emptyNodeState()
-		}
-		if ok && succeeded(ps.State) {
+		case succeeded(outcome(ps)):
 			p.Nodes[n.ID] = Node{State: events.Skipped, Attempt: ps.Attempt, Prior: ps}
+			continue
+		case ps.State == events.Excluded:
+			p.Nodes[n.ID] = Node{State: events.Excluded, Attempt: ps.Attempt, Prior: ps}
 			continue
 		}
 		p.Nodes[n.ID] = pending(ps, ok)
@@ -188,13 +212,23 @@ func (e *UnmetNeedError) Error() string {
 }
 
 // selected plans a run of exactly the nodes in set. Their needs outside
-// the set must have succeeded in prior. When set has no such needs, nothing
-// is taken from prior and the plan is a new run in which the other nodes
-// are excluded.
+// the set must have let them start in prior: succeeded, or failed with
+// continue_on_error, as the engine itself accepts. When set has no such
+// needs, nothing is taken from prior and the plan is a new run in which the
+// other nodes are excluded. A node downstream of the set is excluded too,
+// whatever it did before: its earlier result was against the old run.
 func selected(wf *workflow.Workflow, prior *store.State, mode string, selection, set []string) (Plan, error) {
 	inSet := make(map[string]bool, len(set))
 	for _, id := range set {
 		inSet[id] = true
+	}
+	downstream := map[string]bool{}
+	for _, id := range set {
+		for _, d := range wf.Downstream(id) {
+			if !inSet[d] {
+				downstream[d] = true
+			}
+		}
 	}
 	var outside []string
 	for _, id := range set {
@@ -206,8 +240,8 @@ func selected(wf *workflow.Workflow, prior *store.State, mode string, selection,
 				return Plan{}, &UnmetNeedError{Node: id, Need: need, RunID: "", State: ""}
 			}
 			ps, ok := prior.Nodes[need]
-			if !ok || !succeeded(ps.State) {
-				return Plan{}, &UnmetNeedError{Node: id, Need: need, RunID: prior.RunID, State: ps.State}
+			if !ok || !Satisfies(wf.Node(need), outcome(ps)) {
+				return Plan{}, &UnmetNeedError{Node: id, Need: need, RunID: prior.RunID, State: outcome(ps)}
 			}
 			outside = append(outside, need)
 		}
@@ -226,7 +260,7 @@ func selected(wf *workflow.Workflow, prior *store.State, mode string, selection,
 		switch {
 		case inSet[n.ID]:
 			p.Nodes[n.ID] = pending(ps, ok)
-		case ok && succeeded(ps.State):
+		case ok && !downstream[n.ID] && Satisfies(n, outcome(ps)):
 			p.Nodes[n.ID] = Node{State: events.Skipped, Attempt: ps.Attempt, Prior: ps}
 		default:
 			p.Nodes[n.ID] = Node{State: events.Excluded, Attempt: ps.Attempt, Prior: ps}
@@ -248,8 +282,10 @@ func known(wf *workflow.Workflow, ids []string) error {
 	return nil
 }
 
-// Lost returns the nodes the earlier state shows as running, in
-// declaration order. weft exited without seeing them finish.
+// Lost returns the nodes the earlier state shows as running: the
+// workflow's nodes in declaration order, then nodes the workflow no longer
+// has, by ID. weft exited without seeing them finish, and a removed node's
+// process may be alive all the same.
 func Lost(wf *workflow.Workflow, prior *store.State) []string {
 	var out []string
 	for _, n := range wf.Nodes {
@@ -257,5 +293,14 @@ func Lost(wf *workflow.Workflow, prior *store.State) []string {
 			out = append(out, n.ID)
 		}
 	}
-	return out
+	// state.json may come from a checkout, and these IDs become file paths
+	// in the attempt records, so only well-formed ones are taken.
+	var gone []string
+	for id, ps := range prior.Nodes {
+		if wf.Node(id) == nil && ps.State == events.Running && workflow.ValidID(id) {
+			gone = append(gone, id)
+		}
+	}
+	slices.Sort(gone)
+	return append(out, gone...)
 }

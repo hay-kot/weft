@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"slices"
@@ -108,6 +109,16 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 	if ctx.Err() != nil || isClosed(spec.Kill) {
 		return Result{ExitCode: -1, Signal: "", Reason: ReasonCanceled, Err: nil}
 	}
+	// os/exec reports a missing directory as a failure to exec the shell,
+	// which points the user at the wrong thing.
+	switch info, err := os.Stat(spec.Dir); {
+	case errors.Is(err, fs.ErrNotExist):
+		return startFailure(fmt.Errorf("working directory %s does not exist", spec.Dir))
+	case err != nil:
+		return startFailure(fmt.Errorf("working directory: %w", err))
+	case !info.IsDir():
+		return startFailure(fmt.Errorf("working directory %s is not a directory", spec.Dir))
+	}
 	args := append(slices.Clone(spec.Shell[1:]), spec.Script)
 	// Not CommandContext: canceling means a SIGINT, SIGTERM, SIGKILL ladder
 	// sent to the whole process group, not one SIGKILL to the shell.
@@ -115,15 +126,18 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env
 
-	foreground := false
 	var output *outputPipe
 	if spec.Interactive {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if term.IsTerminal(os.Stdin) {
-			foreground = true
 			cmd.SysProcAttr.Foreground = true
 			cmd.SysProcAttr.Ctty = int(os.Stdin.Fd())
+			restore, err := lendTerminal(os.Stdin)
+			if err != nil {
+				return startFailure(err)
+			}
+			defer restore()
 		}
 	} else {
 		// A new session has no controlling terminal, so a node that opens
@@ -142,9 +156,6 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 	if err := cmd.Start(); err != nil {
 		output.abort()
 		return startFailure(err)
-	}
-	if foreground {
-		defer reclaimForeground(os.Stdin)
 	}
 	output.started()
 
@@ -173,6 +184,7 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 	case err := <-p.waitCh:
 		p.leaderExited(err)
 		output.drain(pipeDrainDelay)
+		p.warnIfGroupLeftBehind()
 		return exitResult(p.err, reason)
 	case <-ctx.Done():
 		reason = ReasonCanceled
@@ -189,6 +201,7 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 	case err := <-p.waitCh:
 		p.leaderExited(err)
 		output.drain(pipeDrainDelay)
+		p.warnIfGroupLeftBehind()
 		return exitResult(p.err, ReasonExit)
 	default:
 	}
@@ -211,6 +224,16 @@ func (p *proc) leaderExited(err error) {
 	p.exited = true
 	p.err = err
 	p.waitCh = nil
+}
+
+// warnIfGroupLeftBehind logs when a node's shell has exited but processes
+// it started are still in its group. weft does not stop them: a node that
+// exits 0 after starting a server did what it said. The log makes the
+// leftovers findable by pgid.
+func (p *proc) warnIfGroupLeftBehind() {
+	if p.groupAlive() {
+		p.log.Warn().Msg("the node exited, but processes it started are still running in its group; weft leaves them alone")
+	}
 }
 
 // groupAlive reports whether any process is left in the group. Before the
@@ -367,8 +390,10 @@ func (o *outputPipe) drain(limit time.Duration) {
 	<-o.done
 }
 
+// startFailure is the result of a node that never ran. Err is shown as
+// "failed to start: ...", so it carries no prefix of its own.
 func startFailure(err error) Result {
-	return Result{ExitCode: -1, Signal: "", Reason: ReasonStartErr, Err: fmt.Errorf("start: %w", err)}
+	return Result{ExitCode: -1, Signal: "", Reason: ReasonStartErr, Err: err}
 }
 
 func exitResult(err error, reason Reason) Result {

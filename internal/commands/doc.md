@@ -36,7 +36,8 @@ weft doc                                this reference
 `weft run` flags: `--ui=auto|tui|plain`, `--concurrency N` (`-j`),
 `--resume`, `--from <node>`, `--only <a,b>`, `--force`, `--exit-on-end`.
 `weft status` and `weft logs` take `--run <run-id>` (default: the latest
-run); `weft logs` also takes `--attempt N` and `--tail N`.
+run) and `--tail N` (status: lines per node that did not succeed, default
+20); `weft logs` also takes `--attempt N`.
 
 ## After a failure
 
@@ -48,23 +49,27 @@ weft run deploy --ui=plain --resume   # skip what succeeded, rerun the rest
 ```
 
 `weft status` ends with a `next:` list of the commands that fit the run.
-`--resume` always continues the latest run. `--from <node>` reruns a node and
+`--resume` always continues the latest run, and never runs a node the latest
+start left out with `--from` or `--only`. `--from <node>` reruns a node and
 everything downstream; `--only a,b` runs exactly those nodes. Both take the
-needs they leave out from the latest run, and fail when those did not
-succeed there.
+needs they leave out from the latest run, and fail when those did not let
+the node start there (succeeded, or failed with `continue_on_error`). Nodes
+downstream of the selection are `excluded`.
 
 ## JSON
 
 - `weft status --json`: one object with `workflow`, `run_id`, `run_dir`,
   `status`, `pid` (while running), `created`, `updated`, `history`, `counts`
   (nodes per state), and `nodes`. Each node has `id`, `label`, `state`,
-  `attempt`, `exit_code`, `reason`, `error`, `started`, `finished`,
-  `duration_ms`, `log` (absolute path), and `log_tail` when it did not
-  succeed.
+  `attempt`, `exit_code` (-1 when no process exited), and `duration_ms`;
+  `reason`, `error`, `started`, `finished`, `log` (absolute path),
+  `log_tail` (when it did not succeed), and `continue_on_error` appear
+  when set. A `failed` node with `continue_on_error` does not fail the run.
 - `weft runs --json`: JSON Lines, one run per line, the same fields without
   `nodes`, plus `unfinished` (IDs of nodes that did not succeed).
 - `weft validate --json`: an array of `{workflow, path, valid, nodes,
-  problems}`.
+  problems}`; `problems` appears when the file is invalid, and `workflow`
+  is empty when the file could not be loaded.
 - `weft graph --json`: `{workflow, orientation, levels, nodes, lines}`.
 
 ## Run status
@@ -73,7 +78,7 @@ succeed there.
 | --- | --- |
 | `running` | a weft process holds the run's lock |
 | `succeeded` | every node succeeded, was skipped, or was excluded |
-| `failed` | a node failed, or was blocked by one that did |
+| `failed` | a node without `continue_on_error` failed, or a node was blocked |
 | `canceled` | the run or a node was canceled, and nothing failed |
 | `interrupted` | no weft holds the run, but nodes never finished: weft died. `--resume` carries it on |
 
@@ -85,14 +90,17 @@ succeed), `canceled`, `skipped` (a resume kept an earlier success),
 `excluded` (outside this start's `--from` or `--only`).
 
 Reasons, on finished nodes: `exit`, `timeout`, `canceled`, `blocked`,
-`start_error`, `skipped`, `excluded`, `abandoned` (the weft running the
-attempt died; recorded when the run is resumed).
+`start_error`, `skipped` (a resume kept an earlier result: a success, or a
+failure with `continue_on_error`, which the node's `error` then says),
+`excluded`, `abandoned` (the weft running the attempt died; recorded when
+the run is resumed).
 
 ## Files
 
 ```text
 .weft/runs/<workflow>/<run-id>/
   state.json               node states, attempts, log paths; history of starts
+  lock                     held by the weft process using the run
   events.jsonl             every state change, in order
   weft.log                 weft's JSON log; more detail with --log-level=debug
   nodes/<node>/<n>.log     output of attempt n, stdout and stderr together

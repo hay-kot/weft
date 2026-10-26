@@ -67,9 +67,18 @@ nodes:
 
 	var canceledAt time.Time
 	go func() {
-		// Cancel once the flood has had time to fill the pipe and the
-		// renderer's queue budget many times over.
-		time.Sleep(time.Second)
+		// Cancel once the flood has gone past the renderer's queue budget,
+		// so the log below provably holds output the stalled terminal never
+		// got. Watching the log instead of sleeping keeps a loaded CI
+		// machine, where the flood is slower, from failing that check.
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			info, err := os.Stat(run.AttemptLogPath("flood", 1))
+			if err == nil && info.Size() > int64(events.DefaultOutputBudget) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 		canceledAt = time.Now()
 		eng.Cancel()
 	}()
@@ -80,7 +89,7 @@ nodes:
 	var s engine.Summary
 	select {
 	case s = <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(20 * time.Second):
 		require.FailNow(t, "run did not end: a stalled stdout blocked the engine")
 	}
 	elapsed := time.Since(canceledAt)

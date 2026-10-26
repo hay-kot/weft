@@ -11,7 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// Lock files are small; readPID reads at most this much.
+const maxPIDBytes = 64
 
 // LockFile is the name of the lock file in a run directory.
 const LockFile = "lock"
@@ -40,20 +44,44 @@ type Lock struct {
 	f *os.File
 }
 
-// Lock takes the run's lock without waiting. It returns a *LockedError
-// when another process holds it.
+// lockRetryFor bounds how long Lock waits out a status reader's probe. InUse
+// holds a shared lock for an instant; without the wait, `weft status` run at
+// the wrong moment would make a `--resume` fail as if the run were in use.
+const (
+	lockRetryFor  = 200 * time.Millisecond
+	lockRetryStep = 10 * time.Millisecond
+)
+
+// Lock takes the run's lock. It returns a *LockedError when another process
+// holds it for longer than a probe takes.
 func (r *Run) Lock() (*Lock, error) {
 	path := filepath.Join(r.Dir, LockFile)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, fileMode) //nolint:gosec // path is inside a run directory
+	if err := mustBeRegular(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("open run lock: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, fileMode) //nolint:gosec // path is inside a run directory
 	if err != nil {
 		return nil, fmt.Errorf("open run lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := f.Chmod(fileMode); err != nil {
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		return nil, fmt.Errorf("open run lock: %w", err)
+	}
+	deadline := time.Now().Add(lockRetryFor)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, fmt.Errorf("lock run %s: %w", r.ID, err)
+		}
+		if time.Now().After(deadline) {
+			_ = f.Close()
 			return nil, &LockedError{RunID: r.ID, PID: readPID(path)}
 		}
-		return nil, fmt.Errorf("lock run %s: %w", r.ID, err)
+		time.Sleep(lockRetryStep)
 	}
 	// The PID is only for the message another weft shows; the flock is
 	// what excludes.
@@ -69,7 +97,7 @@ func (r *Run) Lock() (*Lock, error) {
 // refused as if the run were in use; status readers accept that.
 func (r *Run) InUse() (pid int, inUse bool) {
 	path := filepath.Join(r.Dir, LockFile)
-	f, err := os.Open(path) //nolint:gosec // path is inside a run directory
+	f, err := OpenRegular(path)
 	if err != nil {
 		return 0, false
 	}
@@ -86,13 +114,16 @@ func (l *Lock) Release() {
 	if l == nil || l.f == nil {
 		return
 	}
+	// The PID goes with the lock, so a stale one is never shown as the
+	// holder of a run nobody has.
+	_ = l.f.Truncate(0)
 	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	_ = l.f.Close()
 	l.f = nil
 }
 
 func readPID(path string) int {
-	data, err := os.ReadFile(path) //nolint:gosec // path is inside a run directory
+	data, err := readRegular(path, maxPIDBytes)
 	if err != nil {
 		return 0
 	}

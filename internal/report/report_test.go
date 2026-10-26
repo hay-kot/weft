@@ -197,3 +197,90 @@ func TestTail(t *testing.T) {
 	_, err = report.Tail(filepath.Join(dir, "missing"), 5)
 	require.Error(t, err)
 }
+
+func TestSoftFailureDoesNotFailTheRun(t *testing.T) {
+	t.Parallel()
+
+	wf, err := workflow.Parse([]byte(`
+nodes:
+  lint: {run: x, continue_on_error: true}
+  build: {run: y, needs: [lint]}
+`))
+	require.NoError(t, err)
+	run, st := newRun(t, map[string]store.NodeState{
+		"lint":  node(events.Failed, 1, "exit code 1", 0, time.Second, ""),
+		"build": node(events.Succeeded, 1, "", time.Second, 2*time.Second, ""),
+	})
+
+	r := report.Build(run, st, wf)
+	assert.Equal(t, report.Succeeded, r.Status, "the engine exits 0 for this run; status must agree")
+	assert.True(t, r.Nodes[0].ContinueOnError)
+	assert.Equal(t, events.Failed, r.Nodes[0].State, "the node did fail")
+	text := r.Text("w", true)
+	assert.NotContains(t, text, "--resume")
+	assert.Contains(t, text, "lint   failed     0:01  exit code 1  (continue_on_error: does not fail the run)\n")
+
+	assert.Equal(t, report.Failed, report.Build(run, st, nil).Status, "without the workflow file the failure counts")
+}
+
+func TestBuildKeepsLogPathsInsideTheRunDir(t *testing.T) {
+	t.Parallel()
+
+	run, st := newRun(t, map[string]store.NodeState{
+		"up":   node(events.Failed, 1, "", 0, time.Second, "../../../../etc/passwd"),
+		"abs":  node(events.Failed, 1, "", 0, time.Second, "/etc/passwd"),
+		"fine": node(events.Failed, 1, "", 0, time.Second, "nodes/fine/1.log"),
+	})
+	r := report.Build(run, st, nil)
+	byID := map[string]report.Node{}
+	for _, n := range r.Nodes {
+		byID[n.ID] = n
+	}
+	assert.Empty(t, byID["up"].Log)
+	assert.Empty(t, byID["abs"].Log)
+	assert.Equal(t, filepath.Join(run.Dir, "nodes/fine/1.log"), byID["fine"].Log)
+}
+
+func TestBuildDropsWhatWeftNeverWrote(t *testing.T) {
+	t.Parallel()
+
+	crafted := node(events.Failed, 1, "\x1b[2Jboom", 0, time.Second, "")
+	crafted.State, crafted.Reason = "fail\x1b[2Jed", "ex\x07it"
+	run, st := newRun(t, map[string]store.NodeState{
+		"\x1b]0;owned\x07": node(events.Succeeded, 1, "", 0, time.Second, ""),
+		"ok-node":          crafted,
+	})
+	st.History[0].Mode = "run\x1b[2J"
+
+	r := report.Build(run, st, nil)
+	require.Len(t, r.Nodes, 1, "an ID weft could not have written is left out")
+	assert.Equal(t, "ok-node", r.Nodes[0].ID)
+	assert.Equal(t, "[2Jboom", r.Nodes[0].Error)
+	assert.Equal(t, events.State("fail[2Jed"), r.Nodes[0].State)
+	assert.Equal(t, events.Reason("exit"), r.Nodes[0].Reason)
+	assert.Equal(t, 1, r.Counts["fail[2Jed"])
+	assert.Equal(t, "run[2J", r.History[0].Mode)
+	assert.NotContains(t, r.Text("w", true), "\x1b")
+}
+
+func TestExcludedNodesGetNoLogTail(t *testing.T) {
+	t.Parallel()
+
+	run, st := newRun(t, map[string]store.NodeState{
+		"ship": node(events.Excluded, 1, "", 0, time.Second, "nodes/ship/1.log"),
+		"bad":  node(events.Failed, 1, "exit code 1", 0, time.Second, "nodes/bad/1.log"),
+	})
+	for _, id := range []string{"ship", "bad"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(run.Dir, "nodes", id), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(run.Dir, "nodes", id, "1.log"), []byte("old output\n"), 0o600))
+	}
+	r := report.Build(run, st, nil)
+	r.AddLogTails(5)
+	byID := map[string]report.Node{}
+	for _, n := range r.Nodes {
+		byID[n.ID] = n
+	}
+	assert.Nil(t, byID["ship"].LogTail, "an earlier attempt's log is not this run's failure")
+	assert.Equal(t, []string{"old output"}, byID["bad"].LogTail)
+	assert.NotContains(t, r.Text("w", true), "ship, attempt 1")
+}

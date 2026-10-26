@@ -254,3 +254,23 @@ func TestGitHead(t *testing.T) {
 	git("commit", "-q", "--allow-empty", "-m", "x")
 	assert.Len(t, gitHead(t.Context(), dir), 40)
 }
+
+func TestPrepareFreshRunWritesStateBeforeTheEngine(t *testing.T) {
+	wf := loadStart(t)
+	prep, err := prepare(t.Context(), wf, sel(false, ""), time.Now())
+	require.NoError(t, err)
+	defer prep.lock.Release()
+
+	st, err := prep.run.LoadState()
+	require.NoError(t, err, "a weft killed before the engine's first write leaves a readable run")
+	assert.Len(t, st.History, 1)
+	assert.Equal(t, events.Pending, st.Nodes["build"].State)
+	assert.Equal(t, 1, st.Nodes["build"].Attempt)
+	assert.Len(t, st.Nodes, len(wf.Nodes))
+}
+
+func TestGroupAliveRejectsInitAndEveryone(t *testing.T) {
+	assert.False(t, groupAlive(0), "kill(0) would reach weft's own group")
+	assert.False(t, groupAlive(1), "kill(-1) would reach every process")
+	assert.True(t, groupAlive(syscall.Getpgrp()))
+}

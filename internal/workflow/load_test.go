@@ -553,3 +553,139 @@ func TestLoad(t *testing.T) {
 		assert.Equal(t, path, verr.Path)
 	})
 }
+
+func TestParseRejectsRepeatedTopLevelKeys(t *testing.T) {
+	t.Parallel()
+
+	_, err := workflow.Parse([]byte(`
+concurrency: 2
+nodes:
+  a: {run: echo a}
+concurrency: 8
+nodes:
+  b: {run: echo b}
+`))
+	var verr *workflow.ValidationError
+	require.ErrorAs(t, err, &verr)
+	assert.Equal(t, []string{
+		`line 5: "concurrency" is already set on line 2`,
+		`line 6: "nodes" is already set on line 3`,
+	}, verr.Problems)
+}
+
+func TestParseRejectsAliasesMergeKeysAndExtraDocuments(t *testing.T) {
+	t.Parallel()
+
+	_, err := workflow.Parse([]byte(`
+nodes:
+  base: &base {run: echo base}
+  a: *base
+  b:
+    <<: *base
+    run: echo b
+---
+nodes:
+  c: {run: echo c}
+`))
+	var verr *workflow.ValidationError
+	require.ErrorAs(t, err, &verr)
+	assert.Contains(t, verr.Problems, "line 8: a workflow file holds one YAML document; this one has a second")
+	assert.Contains(t, verr.Problems, "line 4: YAML anchors and aliases (*base) are not supported; write the fields out")
+	assert.Contains(t, verr.Problems, `node "b": line 6: YAML merge keys (<<) are not supported; write the fields out`)
+}
+
+func TestParseChecksNeedsDespiteOtherProblems(t *testing.T) {
+	t.Parallel()
+
+	_, err := workflow.Parse([]byte(`
+nodes:
+  a:
+    run: echo a
+    timeout: soon
+    needs: [ghost]
+`))
+	var verr *workflow.ValidationError
+	require.ErrorAs(t, err, &verr)
+	assert.Contains(t, verr.Problems, `node "a": line 6: needs unknown node "ghost"`)
+}
+
+func TestName(t *testing.T) {
+	t.Parallel()
+
+	for path, want := range map[string]string{
+		"deploy.yml": "deploy", "/x/.weft/ship.yaml": "ship", "a.b.yml": "a.b", ".hidden.yml": ".hidden",
+	} {
+		got, err := workflow.Name(path)
+		require.NoError(t, err, path)
+		assert.Equal(t, want, got, path)
+	}
+	for _, path := range []string{".yml", "..yml", "...yml", "/x/.weft/.yaml"} {
+		_, err := workflow.Name(path)
+		assert.ErrorContains(t, err, "needs a name before its extension", path)
+	}
+}
+
+func TestLoadRejectsExtensionOnlyName(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, workflow.DirName, "...yml")
+	writeFile(t, path, "nodes:\n  build:\n    run: make\n")
+	_, err := workflow.Load(path, root)
+	require.ErrorContains(t, err, "needs a name before its extension")
+}
+
+func TestResolveBareFileNameFallsBackToWeftDir(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".weft", "deploy.yml"), "nodes: {}\n")
+
+	path, gotRoot, err := workflow.Resolve(root, "deploy.yml")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, ".weft", "deploy.yml"), path)
+	assert.Equal(t, root, gotRoot)
+
+	_, _, err = workflow.Resolve(root, "missing.yml")
+	require.ErrorContains(t, err, "workflow file:")
+}
+
+func TestBothExtensionsAreAnError(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".weft", "dup.yml"), "nodes: {}\n")
+	writeFile(t, filepath.Join(root, ".weft", "dup.yaml"), "nodes: {}\n")
+
+	_, _, err := workflow.Resolve(root, "dup")
+	require.ErrorContains(t, err, `workflow "dup" is both dup.yml and dup.yaml`)
+
+	_, err = workflow.List(root)
+	require.ErrorContains(t, err, "has both dup.yaml and dup.yml; a workflow has one file")
+}
+
+func TestParseLabelIsOneLine(t *testing.T) {
+	t.Parallel()
+
+	wf, err := workflow.Parse([]byte("nodes:\n  a:\n    run: x\n    label: |\n      Deploy to prod\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "Deploy to prod", wf.Node("a").Label, "a block scalar's trailing newline is trimmed")
+
+	_, err = workflow.Parse([]byte("nodes:\n  a:\n    run: x\n    label: \"two\\nlines\"\n  b:\n    run: y\n    label: \"\\x1b[2Jclear\"\n"))
+	var verr *workflow.ValidationError
+	require.ErrorAs(t, err, &verr)
+	assert.Equal(t, []string{
+		`node "a": line 4: label must be one line without control characters`,
+		`node "b": line 7: label must be one line without control characters`,
+	}, verr.Problems)
+}
+
+func TestParseRejectsAMalformedSecondDocument(t *testing.T) {
+	t.Parallel()
+
+	_, err := workflow.Parse([]byte("nodes: {a: {run: echo a}}\n---\n: : : [\n"))
+	var verr *workflow.ValidationError
+	require.ErrorAs(t, err, &verr)
+	require.Len(t, verr.Problems, 1)
+	assert.Contains(t, verr.Problems[0], "this one has a second, which does not parse")
+}

@@ -161,3 +161,46 @@ func TestNoRunsYet(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, out, "no runs is no lines, not an error")
 }
+
+func TestAttemptLogForANodeThatNeverRan(t *testing.T) {
+	run, err := store.Create(t.TempDir(), deployName, time.Now())
+	require.NoError(t, err)
+	st := store.NewState(run, "", time.Now())
+	st.Nodes["skip"] = store.NodeState{
+		State: events.Excluded, Attempt: 0, ExitCode: 0, Reason: "", Error: "",
+		Started: time.Time{}, Finished: time.Time{}, Log: "", PGID: 0,
+	}
+	st.Nodes["../up"] = st.Nodes["skip"]
+	require.NoError(t, run.WriteState(st))
+
+	_, err = attemptLog(run, "skip", 0)
+	require.EqualError(t, err, "skip never ran in run "+run.ID+" (it is excluded)")
+	_, err = attemptLog(run, "../up", 0)
+	require.EqualError(t, err, "run "+run.ID+` has no node "../up"; its nodes are skip`)
+}
+
+func TestShellCompletionOffersWorkflowsAndNodes(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".weft"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".weft", "deploy.yml"), []byte("nodes:\n  build: {run: x}\n  ship: {run: y, needs: [build]}\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".weft", "check.yml"), []byte("nodes:\n  lint: {run: x}\n"), 0o600))
+	t.Chdir(root)
+
+	complete := func(args ...string) string {
+		t.Helper()
+		a := app()
+		a.EnableShellCompletion = true
+		var out bytes.Buffer
+		a.Writer = &out
+		require.NoError(t, a.Run(context.Background(), append(append([]string{"weft"}, args...), "--generate-shell-completion")))
+		return out.String()
+	}
+	assert.Equal(t, "check\ndeploy\n", complete("run"))
+	assert.Equal(t, "check\ndeploy\n", complete("status", "dep"), "a name typed in part still lists the workflows")
+	assert.Empty(t, complete("run", "deploy"), "the one argument is complete")
+	assert.Equal(t, "check\ndeploy\n", complete("logs"))
+	assert.Equal(t, "build\nship\n", complete("logs", "deploy"))
+	assert.Empty(t, complete("logs", "deploy", "build"))
+	assert.Contains(t, complete("run", "--u"), "--ui", "flags still complete")
+	assert.Contains(t, complete("logs", "deploy", "--"), "--attempt")
+}

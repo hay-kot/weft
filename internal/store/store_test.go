@@ -78,25 +78,57 @@ func TestCreate(t *testing.T) {
 	nodesInfo, err := os.Stat(filepath.Join(run.Dir, "nodes"))
 	require.NoError(t, err)
 	assert.True(t, nodesInfo.IsDir())
+}
 
+func TestEnsureGitignoreWritesRuns(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, store.EnsureGitignore(root))
 	gitignore, err := os.ReadFile(filepath.Join(root, ".weft", ".gitignore"))
 	require.NoError(t, err)
 	assert.Equal(t, "runs/\n", string(gitignore))
 }
 
-func TestCreateKeepsExistingGitignore(t *testing.T) {
+func TestEnsureGitignoreReportsAFileItCannotChange(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	path := filepath.Join(root, ".weft", ".gitignore")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
-	require.NoError(t, os.WriteFile(path, []byte("custom\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("custom\n"), 0o444))
+	err := store.EnsureGitignore(root)
+	require.ErrorContains(t, err, "add runs/ to")
 
-	mustCreate(t, root, time.Now())
+	run, err := store.Create(root, "deploy", time.Now())
+	require.NoError(t, err, "a run does not depend on the .gitignore")
+	assert.DirExists(t, run.Dir)
+}
 
-	got, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, "custom\n", string(got))
+func TestEnsureGitignoreKeepsRunsInAnExistingFile(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct{ name, before, after string }{
+		{"appends when missing", "custom\n", "custom\nruns/\n"},
+		{"ends an unterminated last line first", "custom", "custom\nruns/\n"},
+		{"leaves runs/ alone", "custom\nruns/\n", "custom\nruns/\n"},
+		{"accepts /runs", "/runs\n", "/runs\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			path := filepath.Join(root, ".weft", ".gitignore")
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+			require.NoError(t, os.WriteFile(path, []byte(tt.before), 0o600))
+
+			require.NoError(t, store.EnsureGitignore(root))
+
+			got, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.after, string(got))
+		})
+	}
 }
 
 func TestRunPaths(t *testing.T) {

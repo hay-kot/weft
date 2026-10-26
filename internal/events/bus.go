@@ -14,7 +14,7 @@ const DefaultOutputBudget = 8 << 20
 // can't stall the engine or delay a cancel. State events are never dropped;
 // a run has a handful per node. Node output is dropped for a subscriber
 // once its queued output passes the subscriber's budget, and the
-// subscriber gets an OutputDropped event when it catches up.
+// subscriber gets an OutputDropped event in the place of the gap.
 type Bus struct {
 	mu     sync.Mutex
 	subs   []*Subscription
@@ -36,13 +36,24 @@ type Subscription struct {
 	wake   chan struct{}
 	budget int
 
-	mu       sync.Mutex
-	queue    []Event
-	queued   int // bytes of NodeOutput in queue
-	dropped  map[string]int
-	dropSeq  []string // nodes with drops, in first-drop order
+	mu     sync.Mutex
+	queue  []item
+	queued int // bytes of NodeOutput in queue
+	// dropping maps a node to the counter of the drop marker that is in the
+	// queue for its current gap, if any.
+	dropping map[string]*int
 	closed   bool
 	finished chan struct{}
+}
+
+// item is one queue entry: an event, or a marker where a node's output was
+// dropped. The marker is delivered as an OutputDropped with the count the
+// gap reached, so a reader learns about the gap where it happened and the
+// queue grows by one entry per gap, not per dropped line.
+type item struct {
+	ev   Event
+	drop *int
+	node string
 }
 
 // Subscribe adds a subscriber. outputBudget caps the bytes of queued node
@@ -60,8 +71,7 @@ func (b *Bus) Subscribe(outputBudget int) *Subscription {
 		mu:       sync.Mutex{},
 		queue:    nil,
 		queued:   0,
-		dropped:  map[string]int{},
-		dropSeq:  nil,
+		dropping: map[string]*int{},
 		closed:   false,
 		finished: make(chan struct{}),
 	}
@@ -114,7 +124,7 @@ func (s *Subscription) Barrier(timeout time.Duration) bool {
 		s.mu.Unlock()
 		return false
 	}
-	s.queue = append(s.queue, b)
+	s.queue = append(s.queue, item{ev: b, drop: nil, node: ""})
 	s.mu.Unlock()
 	s.signal()
 
@@ -134,16 +144,25 @@ func (s *Subscription) push(e Event) {
 	s.mu.Lock()
 	if out, ok := e.(NodeOutput); ok {
 		if s.budget > 0 && s.queued+len(out.Line) > s.budget {
-			if s.dropped[out.Node] == 0 {
-				s.dropSeq = append(s.dropSeq, out.Node)
+			if c := s.dropping[out.Node]; c != nil {
+				*c++
+				s.mu.Unlock()
+				return
 			}
-			s.dropped[out.Node]++
+			c := new(int)
+			*c = 1
+			s.dropping[out.Node] = c
+			s.queue = append(s.queue, item{ev: nil, drop: c, node: out.Node})
 			s.mu.Unlock()
+			s.signal()
 			return
 		}
 		s.queued += len(out.Line)
+		// A line got through, so a later drop is a new gap with its own
+		// marker behind this line.
+		delete(s.dropping, out.Node)
 	}
-	s.queue = append(s.queue, e)
+	s.queue = append(s.queue, item{ev: e, drop: nil, node: ""})
 	s.mu.Unlock()
 	s.signal()
 }
@@ -162,29 +181,27 @@ func (s *Subscription) close() {
 	s.signal()
 }
 
-// next pops the next event to deliver. Pending drop reports go out as soon
-// as the queue has room again, ahead of newer events, so a reader learns
-// about the gap where it happened.
+// next pops the next event to deliver.
 func (s *Subscription) next() (Event, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.dropSeq) > 0 && (s.budget < 0 || s.queued < s.budget/2 || len(s.queue) == 0) {
-		node := s.dropSeq[0]
-		s.dropSeq = s.dropSeq[1:]
-		n := s.dropped[node]
-		delete(s.dropped, node)
-		return OutputDropped{Node: node, Lines: n}, true, false
-	}
 	if len(s.queue) == 0 {
 		return nil, false, s.closed
 	}
-	e := s.queue[0]
-	s.queue[0] = nil
+	it := s.queue[0]
+	s.queue[0] = item{ev: nil, drop: nil, node: ""}
 	s.queue = s.queue[1:]
-	if out, ok := e.(NodeOutput); ok {
+	if it.drop != nil {
+		// Drops that follow delivery of the marker start a new gap.
+		if s.dropping[it.node] == it.drop {
+			delete(s.dropping, it.node)
+		}
+		return OutputDropped{Node: it.node, Lines: *it.drop}, true, false
+	}
+	if out, ok := it.ev.(NodeOutput); ok {
 		s.queued -= len(out.Line)
 	}
-	return e, true, false
+	return it.ev, true, false
 }
 
 func (s *Subscription) pump() {

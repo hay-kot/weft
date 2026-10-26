@@ -21,7 +21,9 @@ go install github.com/hay-kot/weft@latest
 Put one workflow per file in `.weft/<name>.yml` at the root of your project.
 `weft run deploy` loads `.weft/deploy.yml` from the nearest directory above
 the current one that holds a `.weft/` directory. Commands run from that
-directory unless a node sets `dir`.
+directory unless a node sets `dir`. The file is plain YAML: aliases
+(`*name`), merge keys (`<<`), and a second document are rejected, so a
+workflow reads the same way to you and to weft.
 
 ```yaml
 # .weft/deploy.yml
@@ -49,7 +51,7 @@ Top-level fields:
 | Field | Meaning |
 | --- | --- |
 | `concurrency` | Most nodes running at once (default 4) |
-| `shell` | Shell for every node, split on spaces (default `bash -eo pipefail -c`) |
+| `shell` | Shell for every node, split on spaces with no quoting (default `bash -eo pipefail -c`) |
 | `nodes` | Map of node ID to node. IDs match `^[a-z0-9][a-z0-9-]*$` |
 
 Node fields:
@@ -65,7 +67,7 @@ Node fields:
 | `interactive` | Needs the terminal: runs alone, attached to your terminal |
 | `timeout` | Cancel the node after this long, for example `10m` |
 | `kill_timeout` | Grace period after SIGINT on cancel (default `30s`) |
-| `continue_on_error` | A failure does not block downstream nodes |
+| `continue_on_error` | A failure does not block downstream nodes or fail the run |
 
 Every node also gets `WEFT_WORKFLOW`, `WEFT_ROOT`, `WEFT_RUN_ID`,
 `WEFT_RUN_DIR`, `WEFT_NODE`, and `WEFT_ATTEMPT` in its environment.
@@ -79,9 +81,13 @@ Every node also gets `WEFT_WORKFLOW`, `WEFT_ROOT`, `WEFT_RUN_ID`,
 - An interactive node waits until nothing else is running, and nothing else
   starts while it runs. Its output goes straight to your terminal and is not
   captured. It needs a terminal on stdin; without one it fails with a clear
-  error. Other nodes run without a controlling terminal, so a command that
-  tries to prompt on `/dev/tty` (`sudo`, an SSH passphrase) fails instead of
-  hanging or drawing over the screen. Mark such a node `interactive`.
+  error. Ctrl-Z does nothing while it has the terminal: weft can't hand a
+  suspended node to your shell, and a stopped one would leave the terminal
+  stuck. The terminal's settings are put back when the node ends, even if
+  it was killed inside a hidden-input prompt. Other nodes run without a
+  controlling terminal, so a command that tries to prompt on `/dev/tty`
+  (`sudo`, an SSH passphrase) fails instead of hanging or drawing over the
+  screen. Mark such a node `interactive`.
 - Ctrl-C cancels the run. Running nodes get SIGINT, their `kill_timeout`, then
   SIGTERM and 5s more, then SIGKILL. Each node runs in its own process group,
   so `mise` and whatever it started get the signal together. A second Ctrl-C
@@ -154,8 +160,9 @@ full-screen log's title.
 attempt of the node, in the same run directory, and its log in the TUI
 shows the earlier attempt's output above an `── attempt N ──` line. After
 the run ended, a rerun makes it active again, so `ctrl+c` cancels it and
-`q` asks first. `R` leaves a downstream node that is still pending alone
-(it waits for the rerun anyway) and refuses while one is running.
+`q` asks first. A node downstream of the rerun that has not started waits
+for the new attempt, even if it was ready to go on the old one. `R` leaves
+such a node alone and refuses while a downstream node is running.
 
 When an interactive node runs, the TUI steps aside and the node gets the
 terminal. The TUI comes back when the node exits. When the run ends, the
@@ -175,7 +182,11 @@ weft logs <workflow> <node>  a node's output from the latest run
 weft doc                     a compact reference for agents and scripts
 ```
 
-`<workflow>` is a name (`deploy`) or a path to a workflow file.
+`<workflow>` is a name (`deploy`) or a path to a workflow file. For a file
+outside a `.weft/` directory, the file's own directory is the workflow root,
+and weft keeps that file's runs in a `.weft/runs/` there. `weft completion
+bash|zsh|fish` prints a completion script; with it, the tab key completes
+commands, flags, workflow names, and the node of `weft logs`.
 
 `weft graph` prints the layered graph the run view uses:
 
@@ -199,7 +210,7 @@ file is the source of truth.
 | `--ui=auto\|tui\|plain` | Output mode. `auto` picks `tui` when stdin and stdout are terminals, `CI` is unset, and `TERM` is not `dumb`; `plain` prints prefixed lines |
 | `--exit-on-end` | Quit the TUI as soon as the run ends |
 | `--concurrency`, `-j` | Override the workflow's `concurrency` |
-| `--resume` | Carry on the latest run: skip nodes that succeeded, run the rest again |
+| `--resume` | Carry on the latest run: skip nodes that succeeded, run the rest again; nodes the last start left out stay out |
 | `--from <node>` | Run that node and everything downstream of it |
 | `--only <a,b>` | Run only those nodes (comma-separated, or repeat the flag) |
 | `--force` | With `--resume`, `--from`, or `--only`: go ahead even if the workflow file or git HEAD changed |
@@ -265,18 +276,24 @@ succeeded are skipped, and every other node runs again as its next attempt
 includes a node the run shows as still running because weft itself was
 killed. If that node's processes are still alive, weft refuses until you
 stop them (it prints the process group), since a second copy of a release
-must not start next to the first. When every node already succeeded,
-there is nothing to resume, and weft says so and exits 0.
+must not start next to the first. Nodes the last start left out with
+`--from` or `--only` stay `excluded`: a resume never runs a step you chose
+not to run. When every node already succeeded or is excluded, there is
+nothing to resume, and weft says so and exits 0.
 
 `--from <node>` reruns a node and everything downstream of it. `--only
 a,b` runs exactly the nodes you name. Needs they leave out are taken from
-the latest run and must have succeeded there; otherwise weft names the
-need and stops. When a selection needs nothing from the latest run, it is a
-new run, and the nodes it leaves out show as `excluded` and don't fail it.
-For example, CI without a terminal can skip the interactive step:
+the latest run and must have let the node start there: succeeded, or failed
+with `continue_on_error` (then shown as skipped with that note); otherwise
+weft names the need and stops. Nodes downstream of the selection show as
+`excluded`, since their earlier result was against the old run, and so do
+the nodes a new run leaves out; excluded nodes don't fail a run. For
+example, CI without a terminal can skip the interactive step, and someone
+at a terminal can finish the run from it later:
 
 ```bash
 weft run deploy --only guard,go-check,ui-check,release,deploy
+weft run deploy --from tofu-apply
 ```
 
 A resume (or `--from`/`--only` that takes results from the latest run)
@@ -290,7 +307,8 @@ Only one weft at a time can use a run directory. A second `--resume` while
 the first is still going fails with the other weft's PID.
 
 Global flags: `--log-level` (or `WEFT_LOG_LEVEL`) and `--no-color` (or
-`NO_COLOR`). `--no-color` also turns color off for nodes.
+`NO_COLOR` set to anything). `--no-color` also turns color off for nodes,
+unless a node's `env` sets `NO_COLOR` itself.
 
 ## Run directories and logs
 
@@ -298,8 +316,9 @@ Each run gets a sortable ID such as `20261025T191200.482-a3f9` and a directory
 at `.weft/runs/<workflow>/<run-id>/`. The TUI shows both in its header, and
 weft prints them to stderr when the run ends (and when it starts, in plain
 mode). The newest 20 runs per workflow are kept; a run another weft is using is
-never pruned. On first use weft
-writes `.weft/.gitignore` so runs stay out of git.
+never pruned. weft keeps `runs/` in `.weft/.gitignore`, writing the file on
+first use and adding the line to one that lacks it, so command output stays
+out of git.
 
 ```text
 .weft/runs/deploy/20261025T191200.482-a3f9/
@@ -320,8 +339,11 @@ user went ahead past a change. An attempt that weft lost track of gets an
 `<n>.json` record with reason `abandoned` when the run is resumed.
 
 Run with `--log-level=debug` to have `weft.log` explain each scheduling
-decision and every signal sent. Log files are created with mode 0600 because
-command output can hold secrets.
+decision and every signal sent. Run directories are mode 0700 and their
+files 0600, because command output can hold secrets; a resume puts a file
+back to 0600 if something widened it. `weft status` and `weft logs` read
+only regular files inside the run directory, so a run directory that came
+with a checkout can't point them anywhere else.
 
 ## Development
 

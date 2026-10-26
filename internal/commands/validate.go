@@ -47,7 +47,8 @@ Examples:
 				Destination: &cmd.json,
 			},
 		},
-		Action: cmd.run,
+		Action:        cmd.run,
+		ShellComplete: completeWorkflow,
 	})
 
 	return app

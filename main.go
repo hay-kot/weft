@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,10 +54,18 @@ func build() string {
 func setupLogger(level string, noColor bool) error {
 	parsedLevel, err := zerolog.ParseLevel(level)
 	if err != nil {
-		return fmt.Errorf("--log-level: %w", err)
+		return fmt.Errorf("--log-level: %q is not a level; use debug, info, warn, error, fatal, or panic", level)
 	}
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: noColor || !term.IsTerminal(os.Stderr)}).Level(parsedLevel)
 	return nil
+}
+
+// noColorEnv follows no-color.org: NO_COLOR set to anything but the empty
+// string turns color off. It is read here rather than as the flag's env
+// source because urfave/cli parses a bool source strictly, and NO_COLOR=yes
+// would make every weft command fail.
+func noColorEnv(getenv func(string) string) bool {
+	return getenv("NO_COLOR") != ""
 }
 
 // unknownCommand runs when no subcommand matched. Without it, urfave/cli
@@ -71,17 +81,32 @@ func unknownCommand(_ context.Context, c *cli.Command) error {
 	return fmt.Errorf("unknown command %q; run 'weft --help' for the commands", name)
 }
 
+const unknownFlagPrefix = "flag provided but not defined: -"
+
+// usageError hands a flag error back as is. Without it, urfave/cli prints
+// the error, then the command's whole help text, and run prints the error
+// once more in its box. A misspelled flag still gets a suggestion.
+func usageError(_ context.Context, c *cli.Command, err error, _ bool) error {
+	if name, ok := strings.CutPrefix(err.Error(), unknownFlagPrefix); ok {
+		flags := slices.Concat(c.Flags, c.Root().Flags)
+		if s := cli.SuggestFlag(flags, name, false); s != "" {
+			help := "weft --help"
+			if c != c.Root() {
+				help = "weft " + c.Name + " --help"
+			}
+			return fmt.Errorf("%w; did you mean %s? Run '%s' for the flags", err, s, help)
+		}
+	}
+	return err
+}
+
 func main() {
 	os.Exit(run())
 }
 
-func run() int {
-	zerolog.TimeFieldFormat = time.RFC3339Nano
-	zerolog.DurationFieldUnit = time.Millisecond
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-
-	flags := &commands.Flags{}
-
+// newApp builds the command tree. flags receives the global flags once the
+// command line is parsed.
+func newApp(flags *commands.Flags) *cli.Command {
 	app := &cli.Command{
 		Name:  "weft",
 		Usage: `Run task-runner tasks as a DAG with a live graph in your terminal`,
@@ -125,15 +150,18 @@ field.`,
 			},
 			&cli.BoolFlag{
 				Name:        "no-color",
-				Usage:       "disable colored output",
-				Sources:     cli.EnvVars("NO_COLOR"),
+				Usage:       "disable colored output (NO_COLOR in the environment does the same)",
 				Destination: &flags.NoColor,
 			},
 		},
 		Before: func(ctx context.Context, c *cli.Command) (context.Context, error) {
+			if noColorEnv(os.Getenv) {
+				flags.NoColor = true
+			}
 			return ctx, setupLogger(flags.LogLevel, flags.NoColor)
 		},
-		Action: unknownCommand,
+		Action:       unknownCommand,
+		OnUsageError: usageError,
 	}
 	app = commands.NewRunCmd(flags).Register(app)
 	app = commands.NewValidateCmd(flags).Register(app)
@@ -143,6 +171,19 @@ field.`,
 	app = commands.NewLogsCmd(flags).Register(app)
 	app = commands.NewDocCmd(flags).Register(app)
 	// +scaffold:command:register
+	for _, c := range app.Commands {
+		c.OnUsageError = usageError
+	}
+	return app
+}
+
+func run() int {
+	zerolog.TimeFieldFormat = time.RFC3339Nano
+	zerolog.DurationFieldUnit = time.Millisecond
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+
+	flags := &commands.Flags{}
+	app := newApp(flags)
 
 	// Without a handler, Go exits on SIGPIPE when stdout or stderr is a
 	// closed pipe, which would orphan running nodes mid-deploy. Handling it

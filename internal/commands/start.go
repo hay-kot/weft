@@ -134,6 +134,26 @@ func prepare(ctx context.Context, wf *workflow.Workflow, sel selection, now time
 		At: now, PID: os.Getpid(), Mode: prep.plan.Mode, Nodes: prep.plan.Selection,
 		WorkflowHash: wf.Hash, GitHead: head, Forced: len(prep.drift) > 0,
 	})
+	if !prep.plan.Continue {
+		// A new run gets its state.json before anything else can fail. A
+		// weft that stops before the engine's first write (a log it can't
+		// open, a kill at startup) would otherwise leave a bare directory
+		// that Latest picks and --resume can't use, hiding the run before
+		// it. The nodes go in as planned, so such a run reads as
+		// interrupted rather than as an empty success. A continued run has
+		// its file already, and its new history entry waits for the user
+		// to confirm the start.
+		for id, pn := range prep.plan.Nodes {
+			prep.state.Nodes[id] = store.NodeState{
+				State: pn.State, Attempt: pn.Attempt, ExitCode: 0, Reason: "", Error: "",
+				Started: time.Time{}, Finished: time.Time{}, Log: "", PGID: 0,
+			}
+		}
+		if err := prep.run.WriteState(prep.state); err != nil {
+			prep.lock.Release()
+			return nil, err
+		}
+	}
 	return prep, nil
 }
 
@@ -171,7 +191,7 @@ func (p *prepared) planFromLatest(wf *workflow.Workflow, sel selection) error {
 		}
 		p.plan = plan.Resume(wf, p.prior)
 		if len(p.plan.Pending(wf)) == 0 {
-			return fmt.Errorf("run %s: %w: every node already succeeded", p.run.ID, errNothingToRun)
+			return fmt.Errorf("run %s: %w: every node already succeeded or was left out", p.run.ID, errNothingToRun)
 		}
 		return nil
 	}
@@ -194,6 +214,11 @@ func (p *prepared) planFromLatest(wf *workflow.Workflow, sel selection) error {
 }
 
 func (p *prepared) createRun(wf *workflow.Workflow, now time.Time) error {
+	if err := store.EnsureGitignore(wf.Root); err != nil {
+		// A read-only or odd .gitignore must not stop a run; the user is
+		// told so the logs don't end up in git by accident.
+		log.Warn().Err(err).Msg("could not keep runs/ in .weft/.gitignore; check that run logs stay out of git")
+	}
 	// Prune before creating so the new run is one of the kept ones.
 	if err := store.Prune(wf.Root, wf.Name, store.KeepRuns-1); err != nil {
 		// Old runs only cost disk; the new run doesn't depend on them.
@@ -205,6 +230,7 @@ func (p *prepared) createRun(wf *workflow.Workflow, now time.Time) error {
 	}
 	lock, err := run.Lock()
 	if err != nil {
+		_ = os.RemoveAll(run.Dir)
 		return err
 	}
 	p.run, p.lock = run, lock
@@ -223,12 +249,16 @@ func (p *prepared) recordLost(wf *workflow.Workflow) error {
 		if _, err := os.Stat(p.run.AttemptRecordPath(id, ns.Attempt)); !errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		n := wf.Node(id)
 		rec := store.AttemptRecord{
-			Node: id, Attempt: ns.Attempt, Command: n.Run, Shell: n.Shell, Dir: filepath.Join(wf.Root, n.Dir), Interactive: n.Interactive,
+			Node: id, Attempt: ns.Attempt, Command: "", Shell: nil, Dir: "", Interactive: false,
 			State: string(events.Failed), Reason: events.ReasonAbandoned, ExitCode: -1, Signal: "",
 			Error:   "weft exited while this attempt was running; it never saw the attempt end",
 			Started: ns.Started, Finished: p.prior.Updated, Log: ns.Log,
+		}
+		// The workflow may have lost the node since; its command is then
+		// unknown.
+		if n := wf.Node(id); n != nil {
+			rec.Command, rec.Shell, rec.Dir, rec.Interactive = n.Run, n.Shell, filepath.Join(wf.Root, n.Dir), n.Interactive
 		}
 		if err := p.run.WriteAttemptRecord(rec); err != nil {
 			return fmt.Errorf("record lost attempt %d of %s: %w", ns.Attempt, id, err)
@@ -244,14 +274,20 @@ func aliveAttempts(wf *workflow.Workflow, prior *store.State) []lostAttempt {
 	var out []lostAttempt
 	for _, id := range plan.Lost(wf, prior) {
 		ns := prior.Nodes[id]
-		if ns.PGID > 0 && groupAlive(ns.PGID) {
+		if groupAlive(ns.PGID) {
 			out = append(out, lostAttempt{node: id, attempt: ns.Attempt, pgid: ns.PGID})
 		}
 	}
 	return out
 }
 
+// groupAlive reports whether process group pgid has processes. Group 1 is
+// init's and kill(-1) means every process, so neither is a node's group,
+// whatever a state.json says.
 func groupAlive(pgid int) bool {
+	if pgid <= 1 {
+		return false
+	}
 	err := syscall.Kill(-pgid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
@@ -263,7 +299,8 @@ func aliveError(sel selection, runID string, alive []lostAttempt) error {
 		parts = append(parts, fmt.Sprintf("%s (attempt %d, process group %d)", a.node, a.attempt, a.pgid))
 	}
 	return fmt.Errorf("%s: run %s was cut off while nodes ran, and their processes may still be running: %s. "+
-		"Stop them (kill -INT -<group>) or let them finish, then try again. --force goes ahead anyway",
+		"Check with 'ps -o pid,pgid,command -g <group>' (the group ID may since have gone to unrelated processes), "+
+		"then stop them or let them finish and try again. --force goes ahead anyway",
 		sel.flag(), runID, strings.Join(parts, ", "))
 }
 
@@ -295,11 +332,16 @@ func gitHead(ctx context.Context, dir string) string {
 // startNotice describes a run that is not a plain fresh run, or returns
 // empty for one that is.
 func startNotice(wf *workflow.Workflow, p plan.Plan, runID string, sel selection) string {
-	var run, skipped, excluded []string
+	var run, excluded []string
+	skipped, kept := 0, 0
 	for _, n := range wf.Nodes {
 		switch p.Nodes[n.ID].State {
 		case events.Skipped:
-			skipped = append(skipped, n.ID)
+			if plan.PriorFailed(p.Nodes[n.ID].Prior) {
+				kept++
+			} else {
+				skipped++
+			}
 		case events.Excluded:
 			excluded = append(excluded, n.ID)
 		default:
@@ -316,8 +358,11 @@ func startNotice(wf *workflow.Workflow, p plan.Plan, runID string, sel selection
 		fmt.Fprintf(&b, "%s: ", sel.flag())
 	}
 	fmt.Fprintf(&b, "running %s", strings.Join(run, ", "))
-	if len(skipped) > 0 {
-		fmt.Fprintf(&b, "; skipping %d that succeeded", len(skipped))
+	if skipped > 0 {
+		fmt.Fprintf(&b, "; skipping %d that succeeded", skipped)
+	}
+	if kept > 0 {
+		fmt.Fprintf(&b, "; keeping %d that failed with continue_on_error", kept)
 	}
 	if len(excluded) > 0 {
 		fmt.Fprintf(&b, "; leaving out %s", strings.Join(excluded, ", "))

@@ -148,6 +148,7 @@ Examples:
 				Name:        "concurrency",
 				Aliases:     []string{"j"},
 				Usage:       "maximum nodes running at once (default: the workflow's concurrency)",
+				HideDefault: true,
 				Destination: &cmd.concurrency,
 				Validator: func(n int) error {
 					if n < 0 {
@@ -157,7 +158,8 @@ Examples:
 				},
 			},
 		},
-		Action: cmd.run,
+		Action:        cmd.run,
+		ShellComplete: completeWorkflow,
 	})
 
 	return app
@@ -167,6 +169,11 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 	if c.NArg() != 1 {
 		return errors.New("usage: weft run <workflow>")
 	}
+	// urfave/cli splits `--only a, b` on commas and keeps the space.
+	for i, id := range cmd.sel.only {
+		cmd.sel.only[i] = strings.TrimSpace(id)
+	}
+	cmd.sel.from = strings.TrimSpace(cmd.sel.from)
 	if err := cmd.sel.validate(); err != nil {
 		return err
 	}
@@ -445,7 +452,12 @@ func (r *runSession) tui(ctx context.Context, confirm string) (summary engine.Su
 		}
 		ran <- true
 		r.begin()
-		s := eng.Run(ctx)
+		// Signals reach the engine through handleSignals, which cancels the
+		// pass and leaves the run open for reruns, the same as ctrl+c in the
+		// TUI. The signal context would end the run for good instead, and
+		// r would answer "the run is over" while the TUI still shows it.
+		// The TUI closes the engine when it exits.
+		s := eng.Run(context.WithoutCancel(ctx))
 		r.bus.Close()
 		result <- s
 	}()

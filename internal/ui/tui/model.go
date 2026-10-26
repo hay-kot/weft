@@ -83,9 +83,12 @@ type (
 		signal string
 	}
 	// lendMsg asks for the terminal on behalf of an interactive node.
+	// started closes when fn begins and ran when it returns, so a Lend
+	// that outlives the program still learns the node's result stands.
 	lendMsg struct {
-		fn    func()
-		reply chan<- error
+		fn           func()
+		reply        chan<- error
+		started, ran chan<- struct{}
 	}
 	// lendDoneMsg reports that the terminal is back.
 	lendDoneMsg struct {
@@ -98,6 +101,9 @@ type (
 		node       string
 		downstream bool
 		err        error
+		// betweenPasses says the run was over when the rerun was asked
+		// for, so an accepted one starts a new pass.
+		betweenPasses bool
 	}
 	// cancelNodeDoneMsg reports how a node cancel request went.
 	cancelNodeDoneMsg struct {
@@ -160,7 +166,14 @@ type Model struct {
 	// ticking is set while a tick is scheduled, so a pass that starts
 	// after the clock stopped restarts it exactly once.
 	ticking bool
+	// rerunPending is set from an accepted rerun until its RunStarted
+	// arrives. The engine has the new pass by then, so q and ctrl+c must
+	// not treat the run as over in between.
+	rerunPending bool
 }
+
+// runOver reports whether no pass is going or about to start.
+func (m Model) runOver() bool { return m.rs.done && !m.rerunPending }
 
 // New returns a Model for one run.
 func New(opts Options) Model {
@@ -196,6 +209,7 @@ func New(opts Options) Model {
 		stopping:       "",
 		stoppingNotice: "",
 		ticking:        true,
+		rerunPending:   false,
 	}
 }
 
@@ -252,6 +266,7 @@ func (m Model) applyEvents(evs []events.Event) (Model, tea.Cmd) {
 		switch e := e.(type) {
 		case events.RunStarted:
 			m.rs.started = e.At
+			m.rerunPending = false
 			if m.rs.done {
 				m = m.passStarted()
 				if !m.ticking {
@@ -352,7 +367,7 @@ func (m Model) interrupted(msg interruptedMsg) (Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	m.cancelLevel = max(m.cancelLevel, msg.level)
-	if m.rs.done || msg.level == 0 {
+	if m.runOver() || msg.level == 0 {
 		return m, nil
 	}
 	from := ""
@@ -390,7 +405,7 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	if key.Matches(k, m.keys.Cancel) {
-		if m.rs.done {
+		if m.runOver() {
 			return m, tea.Quit
 		}
 		return m, m.interrupt()
@@ -415,7 +430,7 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	case key.Matches(k, m.keys.CancelNode):
 		return m.requestCancelNode(m.graph.selected)
 	case key.Matches(k, m.keys.Quit):
-		if m.rs.done {
+		if m.runOver() {
 			return m, tea.Quit
 		}
 		m.ask = question{kind: askQuit, node: "", downstream: false}
@@ -459,7 +474,9 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 // starting.
 func (m Model) dialogKey(k tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	if key.Matches(k, m.keys.Cancel) {
-		if m.ask.kind == askStart {
+		// With no pass to cancel, as after the run on the rerun question,
+		// the key only closes the question; falling through would quit.
+		if m.ask.kind == askStart || m.runOver() {
 			return m.answer(false)
 		}
 		m, cmd, _ := m.answer(false)
@@ -528,8 +545,9 @@ func (m Model) requestRerun(id string, downstream bool) (Model, tea.Cmd) {
 
 func (m Model) rerun(id string, downstream, force bool) tea.Cmd {
 	fn := m.opts.Rerun
+	between := m.rs.done
 	return func() tea.Msg {
-		return rerunDoneMsg{node: id, downstream: downstream, err: fn(id, downstream, force)}
+		return rerunDoneMsg{node: id, downstream: downstream, err: fn(id, downstream, force), betweenPasses: between}
 	}
 }
 
@@ -546,12 +564,19 @@ func (m Model) rerunDone(msg rerunDoneMsg) Model {
 			"Rerun", "Skip", false, m.styles)
 		return m
 	}
-	switch {
-	case msg.err != nil:
+	if msg.err != nil {
 		m.footer = m.footer.withNotice(noticeWarn, msg.err.Error())
-	case msg.downstream:
+		return m
+	}
+	// Only a rerun asked for between passes starts a new pass, with a
+	// RunStarted to clear this. One that joined a going pass gets no event
+	// of its own, even when that pass ended before this reply arrived.
+	if msg.betweenPasses && m.rs.done {
+		m.rerunPending = true
+	}
+	if msg.downstream {
 		m.footer = m.footer.withNotice(noticeInfo, "rerunning "+name+" and everything downstream of it")
-	default:
+	} else {
 		m.footer = m.footer.withNotice(noticeInfo, "rerunning "+name)
 	}
 	return m
@@ -624,7 +649,7 @@ func (m Model) footerHelp() []key.Binding {
 	}
 	// ctrl+c before the start confirmation quits without starting, so it
 	// is not a cancel there.
-	running := !m.rs.done && m.ask.kind != askStart
+	running := !m.runOver() && m.ask.kind != askStart
 	return m.keys.mainHelp(running)
 }
 

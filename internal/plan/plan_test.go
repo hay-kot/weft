@@ -145,7 +145,7 @@ func TestResume(t *testing.T) {
 			},
 		},
 		{
-			name: "nodes added to the workflow since run as new; excluded nodes run",
+			name: "nodes added to the workflow since run as new; excluded nodes stay out",
 			prior: prior(map[string]store.NodeState{
 				nGuard:   ns(events.Succeeded, 1),
 				nSide:    ns(events.Excluded, 0),
@@ -153,7 +153,7 @@ func TestResume(t *testing.T) {
 			}),
 			want: shape{
 				nGuard: skip1, nGoCheck: pend1, nUICheck: pend1, nDBBackup: pend1,
-				nRelease: pend1, nDeploy: pend1, nTofu: pend1, nSide: pend1,
+				nRelease: pend1, nDeploy: pend1, nTofu: pend1, nSide: "excluded/0",
 			},
 		},
 	}
@@ -394,8 +394,13 @@ func TestLost(t *testing.T) {
 		nDeploy:  ns(events.Running, 2),
 		nGoCheck: ns(events.Running, 1),
 		nRelease: ns(events.Succeeded, 1),
+		"zebra":  ns(events.Running, 1),
+		"gone":   ns(events.Running, 1),
+		"done":   ns(events.Succeeded, 1),
+		"../up":  ns(events.Running, 1),
 	})
-	assert.Equal(t, []string{nGoCheck, nDeploy}, plan.Lost(deployWorkflow(t), pr))
+	assert.Equal(t, []string{nGoCheck, nDeploy, "gone", "zebra"}, plan.Lost(deployWorkflow(t), pr),
+		"workflow nodes in order, then nodes the workflow lost, by ID; an ID weft never wrote is left out")
 }
 
 func TestDrift(t *testing.T) {
@@ -426,4 +431,82 @@ func TestDrift(t *testing.T) {
 	}
 	err := &plan.DriftError{RunID: "r1", Reasons: []string{"the workflow file changed", "git HEAD moved from a to b"}}
 	assert.EqualError(t, err, "since run r1 last started, the workflow file changed and git HEAD moved from a to b")
+}
+
+func TestResumeKeepsExcludedNodesOut(t *testing.T) {
+	t.Parallel()
+
+	pr := deployFailed()
+	pr.Nodes[nTofu] = ns(events.Excluded, 0)
+	pr.Nodes[nSide] = ns(events.Excluded, 0)
+	p := plan.Resume(deployWorkflow(t), pr)
+	assert.Equal(t, events.Excluded, p.Nodes[nTofu].State, "a resume never widens the last selection")
+	assert.Equal(t, events.Excluded, p.Nodes[nSide].State)
+	assert.Equal(t, events.Pending, p.Nodes[nDeploy].State)
+	assert.Equal(t, []string{nDeploy}, p.Pending(deployWorkflow(t)))
+}
+
+const (
+	nLint  = "lint"
+	nBuild = "build"
+	nShip  = "ship"
+)
+
+func TestSelectedAcceptsANeedKeptByContinueOnError(t *testing.T) {
+	t.Parallel()
+
+	wf, err := workflow.Parse([]byte(`
+nodes:
+  lint: {run: lint, continue_on_error: true}
+  build: {run: build, needs: [lint]}
+  ship: {run: ship, needs: [build]}
+`))
+	require.NoError(t, err)
+	pr := prior(map[string]store.NodeState{
+		nLint:  ns(events.Failed, 1),
+		nBuild: ns(events.Succeeded, 1),
+		nShip:  ns(events.Succeeded, 1),
+	})
+
+	p, err := plan.Only(wf, pr, []string{nBuild})
+	require.NoError(t, err, "the engine let build start on lint's failure, so --only does too")
+	assert.True(t, p.Continue)
+	assert.Equal(t, events.Skipped, p.Nodes[nLint].State)
+	assert.Equal(t, events.Failed, p.Nodes[nLint].Prior.State, "the kept result is the failure")
+	assert.Equal(t, events.Pending, p.Nodes[nBuild].State)
+	assert.Equal(t, events.Excluded, p.Nodes[nShip].State, "downstream of the selection: its result was against the old build")
+
+	pr.Nodes[nLint] = ns(events.Blocked, 1)
+	_, err = plan.Only(wf, pr, []string{nBuild})
+	require.ErrorContains(t, err, "did not succeed in the latest run")
+
+	// After one continuation the kept failure is a skipped node with the
+	// exit code; it still reads as the failure it was.
+	kept := ns(events.Skipped, 1)
+	kept.ExitCode = 1
+	pr.Nodes[nLint] = kept
+	p, err = plan.Only(wf, pr, []string{nBuild})
+	require.NoError(t, err)
+	assert.Equal(t, events.Skipped, p.Nodes[nLint].State)
+	assert.True(t, plan.PriorFailed(p.Nodes[nLint].Prior))
+
+	strict, err := workflow.Parse([]byte("nodes:\n  lint: {run: lint}\n  build: {run: build, needs: [lint]}\n  ship: {run: ship, needs: [build]}\n"))
+	require.NoError(t, err)
+	_, err = plan.Only(strict, pr, []string{nBuild})
+	require.ErrorContains(t, err, "(it is failed)", "without continue_on_error the kept failure no longer satisfies")
+	assert.Equal(t, []string{nLint}, plan.Resume(strict, pr).Pending(strict), "and a resume runs lint again")
+}
+
+func TestFromExcludesWhatIsDownstreamOfTheSelection(t *testing.T) {
+	t.Parallel()
+
+	pr := deployFailed()
+	pr.Nodes[nDeploy] = ns(events.Succeeded, 1)
+	pr.Nodes[nTofu] = ns(events.Succeeded, 1)
+	p, err := plan.Only(deployWorkflow(t), pr, []string{nDeploy})
+	require.NoError(t, err)
+	assert.Equal(t, events.Pending, p.Nodes[nDeploy].State)
+	assert.Equal(t, events.Excluded, p.Nodes[nTofu].State, "tofu-apply's success was against the old deploy")
+	assert.Equal(t, events.Skipped, p.Nodes[nRelease].State, "release is upstream; its result stands")
+	assert.Equal(t, events.Skipped, p.Nodes[nSide].State, "side is independent of deploy")
 }

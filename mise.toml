@@ -1,11 +1,9 @@
 [tools]
-go = "latest"
+# The major.minor matches go.mod, so CI and releases build with the same Go.
+go = "1.27"
 golangci-lint = "latest"
 goreleaser = "latest"
 "github:gotestyourself/gotestsum" = "latest"
-
-[env]
-LOG_LEVEL = "debug"
 
 [tasks.run]
 description = "Run the main application"
@@ -30,6 +28,10 @@ run = "go test -race -coverprofile=coverage.out -covermode=atomic ./... -v -cove
 [tasks.tidy]
 description = "Run go mod tidy"
 run = "go mod tidy"
+
+[tasks."tidy:check"]
+description = "Fail when go mod tidy would change go.mod or go.sum"
+run = "go mod tidy && git diff --exit-code go.mod go.sum"
 
 [tasks.lint]
 description = "Run golangci-lint"

@@ -161,21 +161,32 @@ func (l *Lender) Lend(fn func()) error {
 		return ErrExited
 	default:
 	}
-	go l.app.program.Send(lendMsg{fn: fn, reply: reply})
+	started, ran := make(chan struct{}), make(chan struct{})
+	go l.app.program.Send(lendMsg{fn: fn, reply: reply, started: started, ran: ran})
 	select {
 	case err := <-reply:
 		return err
 	case <-l.app.exited:
-		return ErrExited
+		// The program can die after the node ran but before the reply is
+		// sent (a failed terminal restore, a panic elsewhere). The node's
+		// result stands then, so fn is waited for and no error reported.
+		select {
+		case <-started:
+			<-ran
+			return nil
+		default:
+			return ErrExited
+		}
 	}
 }
 
 // handoff is the tea.ExecCommand that runs an interactive node.
 type handoff struct {
-	fn   func()
-	node string
-	out  io.Writer
-	ran  bool
+	fn           func()
+	node         string
+	out          io.Writer
+	ran          bool
+	started, did chan<- struct{}
 }
 
 func (h *handoff) SetStdin(io.Reader)    {}
@@ -191,13 +202,21 @@ func (h *handoff) Run() error {
 		out = os.Stdout
 	}
 	_, _ = fmt.Fprintf(out, "\nweft: %s has the terminal. weft comes back when it exits.\n\n", h.node)
+	signalDone(h.started)
 	h.fn()
 	h.ran = true
+	signalDone(h.did)
 	return nil
 }
 
+func signalDone(ch chan<- struct{}) {
+	if ch != nil {
+		close(ch)
+	}
+}
+
 func (m Model) lend(msg lendMsg) tea.Cmd {
-	h := &handoff{fn: msg.fn, node: m.interactiveNode(), out: nil, ran: false}
+	h := &handoff{fn: msg.fn, node: m.interactiveNode(), out: nil, ran: false, started: msg.started, did: msg.ran}
 	return tea.Exec(h, func(err error) tea.Msg {
 		return lendDoneMsg{reply: msg.reply, ran: h.ran, err: err}
 	})

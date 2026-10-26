@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hay-kot/weft/internal/events"
 	"github.com/hay-kot/weft/internal/store"
@@ -63,6 +63,8 @@ type Node struct {
 	// LogTail holds the last lines of the log of a node that did not
 	// succeed, when asked for.
 	LogTail []string `json:"log_tail,omitempty"`
+	// ContinueOnError is set for a node whose failure does not fail the run.
+	ContinueOnError bool `json:"continue_on_error,omitempty"`
 }
 
 // Run summarizes one run.
@@ -125,26 +127,39 @@ func Build(run *store.Run, st *store.State, wf *workflow.Workflow) Run {
 	if r.History == nil {
 		r.History = []store.Start{}
 	}
+	for i := range r.History {
+		r.History[i].Mode = printable(r.History[i].Mode)
+	}
+	softFailed := 0
 	for _, id := range nodeOrder(st, wf) {
 		ns := st.Nodes[id]
 		n := Node{
-			ID: id, Label: id, State: ns.State, Attempt: ns.Attempt, ExitCode: ns.ExitCode,
-			Reason: ns.Reason, Error: ns.Error, Started: ns.Started, Finished: ns.Finished,
-			DurationMS: duration(ns, st.Updated, inUse).Milliseconds(), Log: "", LogTail: nil,
+			ID: id, Label: id, State: events.State(printable(string(ns.State))), Attempt: ns.Attempt, ExitCode: ns.ExitCode,
+			Reason: events.Reason(printable(string(ns.Reason))), Error: printable(ns.Error), Started: ns.Started, Finished: ns.Finished,
+			DurationMS: duration(ns, st.Updated, inUse).Milliseconds(), Log: "", LogTail: nil, ContinueOnError: false,
 		}
 		if wf != nil && wf.Node(id) != nil {
 			n.Label = wf.Node(id).DisplayName()
+			n.ContinueOnError = wf.Node(id).ContinueOnError
 		}
-		if ns.Log != "" {
+		// state.json may come from a checkout, so a log path there is only
+		// followed when it stays inside the run directory.
+		if ns.Log != "" && filepath.IsLocal(ns.Log) {
 			n.Log = filepath.Join(run.Dir, ns.Log)
 		}
-		r.Counts[ns.State]++
+		if n.ContinueOnError && n.State == events.Failed {
+			softFailed++
+		}
+		r.Counts[n.State]++
 		r.Nodes = append(r.Nodes, n)
 	}
-	r.Status = status(r.Counts, inUse)
+	r.Status = status(r.Counts, softFailed, inUse)
 	return r
 }
 
+// nodeOrder lists the state's node IDs in workflow order, then the rest by
+// ID. An ID that is not a valid node ID is left out: it did not come from
+// weft, and it would reach the terminal and the filesystem.
 func nodeOrder(st *store.State, wf *workflow.Workflow) []string {
 	var ids []string
 	seen := map[string]bool{}
@@ -158,12 +173,23 @@ func nodeOrder(st *store.State, wf *workflow.Workflow) []string {
 	}
 	var rest []string
 	for id := range st.Nodes {
-		if !seen[id] {
+		if !seen[id] && workflow.ValidID(id) {
 			rest = append(rest, id)
 		}
 	}
 	slices.Sort(rest)
 	return append(ids, rest...)
+}
+
+// printable drops control characters from text read back from disk, so a
+// crafted state.json can't drive the terminal through weft status.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // duration is how long a node ran. A node still running in a live run has
@@ -182,7 +208,9 @@ func duration(ns store.NodeState, updated time.Time, inUse bool) time.Duration {
 	}
 }
 
-func status(counts map[events.State]int, inUse bool) Status {
+// status derives the run's status. softFailed counts failed nodes with
+// continue_on_error, which the engine does not count against the run.
+func status(counts map[events.State]int, softFailed int, inUse bool) Status {
 	if inUse {
 		return Running
 	}
@@ -192,7 +220,7 @@ func status(counts map[events.State]int, inUse bool) Status {
 		}
 	}
 	switch {
-	case counts[events.Failed] > 0:
+	case counts[events.Failed] > softFailed:
 		return Failed
 	case counts[events.Canceled] > 0:
 		return Canceled
@@ -204,14 +232,20 @@ func status(counts map[events.State]int, inUse bool) Status {
 }
 
 // AddLogTails fills LogTail for every node that ran and did not succeed,
-// with up to n of its last lines.
+// with up to n of its last lines. An excluded node keeps the log of an
+// earlier attempt this run did not use, so it gets none.
 func (r *Run) AddLogTails(n int) {
 	if n <= 0 {
 		return
 	}
 	for i := range r.Nodes {
 		node := &r.Nodes[i]
-		if node.Log == "" || node.State == events.Succeeded || node.State == events.Skipped {
+		switch node.State {
+		case events.Succeeded, events.Skipped, events.Excluded:
+			continue
+		case events.Pending, events.Ready, events.Running, events.Waiting, events.Failed, events.Blocked, events.Canceled:
+		}
+		if node.Log == "" {
 			continue
 		}
 		if lines, err := Tail(node.Log, n); err == nil {
@@ -227,7 +261,7 @@ const tailBytes = 256 * 1024
 // Tail returns up to n of the last lines of the file at path, without
 // their newlines. A first line cut short by the read limit is dropped.
 func Tail(path string, n int) ([]string, error) {
-	f, err := os.Open(path) //nolint:gosec // path is a node log inside a run directory
+	f, err := store.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}
@@ -308,11 +342,16 @@ func (r *Run) Text(workflowArg string, latest bool) string {
 		if n.Attempt > 1 {
 			line += fmt.Sprintf("  attempt %d", n.Attempt)
 		}
-		if !n.Started.IsZero() {
+		// An excluded node carries the times of an earlier attempt, which
+		// this run did not use.
+		if !n.Started.IsZero() && n.State != events.Excluded {
 			line += "  " + ui.FormatDuration(time.Duration(n.DurationMS)*time.Millisecond)
 		}
 		if n.Error != "" {
 			line += "  " + n.Error
+		}
+		if n.ContinueOnError && n.State == events.Failed {
+			line += "  (continue_on_error: does not fail the run)"
 		}
 		b.WriteString(strings.TrimRight(line, " ") + "\n")
 	}

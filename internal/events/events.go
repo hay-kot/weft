@@ -55,8 +55,8 @@ const (
 	ReasonBlocked Reason = "blocked"
 	// ReasonStartError: weft could not start the process.
 	ReasonStartError Reason = "start_error"
-	// ReasonSkipped: a resume kept the node's success from an earlier
-	// attempt.
+	// ReasonSkipped: a resume kept the node's result from an earlier
+	// attempt: a success, or a failure its continue_on_error allowed.
 	ReasonSkipped Reason = "skipped"
 	// ReasonExcluded: the node is outside the selection of this start.
 	ReasonExcluded Reason = "excluded"

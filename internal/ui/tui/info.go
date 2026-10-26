@@ -58,7 +58,12 @@ func (m Model) nodeInfo(id string) *dialog {
 			label = "run"
 		}
 		pad := strings.Repeat(" ", infoLabelWidth-ansi.StringWidth(label))
-		body = append(body, dialogLine{text: m.styles.Dim.Render(label) + pad + line, wrap: true, rule: false, indent: infoLabelWidth})
+		// An empty label is left unstyled: a zero-width SGR prefix would
+		// keep hangingWrap from trimming the continuation rows.
+		if label != "" {
+			label = m.styles.Dim.Render(label)
+		}
+		body = append(body, dialogLine{text: label + pad + line, wrap: true, rule: false, indent: infoLabelWidth})
 	}
 	dir := n.Dir
 	if dir == "" {

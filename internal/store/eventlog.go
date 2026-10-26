@@ -2,11 +2,12 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
-	"os"
 	"time"
 
 	"github.com/hay-kot/weft/internal/events"
@@ -46,13 +47,13 @@ func EventType(e events.Event) string {
 // A resumed run appends to the same file, and seq carries on from its last
 // line.
 func (r *Run) WriteEvents(ch <-chan events.Event) error {
-	seq, err := countLines(r.EventsPath())
+	seq, terminated, err := countLines(r.EventsPath())
 	if err != nil {
 		for range ch {
 		}
 		return fmt.Errorf("read event log: %w", err)
 	}
-	f, err := os.OpenFile(r.EventsPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, fileMode)
+	f, err := appendRegular(r.EventsPath())
 	if err != nil {
 		// Drain so the bus never blocks on this subscriber.
 		for range ch {
@@ -63,6 +64,13 @@ func (r *Run) WriteEvents(ch <-chan events.Event) error {
 	enc := json.NewEncoder(w)
 
 	var firstErr error
+	if !terminated {
+		// A weft killed mid-write left a cut-off record. It took a seq above;
+		// ending its line keeps the next record parseable on its own.
+		if _, err := w.WriteString("\n"); err != nil {
+			firstErr = err
+		}
+	}
 	for e := range ch {
 		switch e.(type) {
 		case events.NodeOutput, events.Barrier:
@@ -84,20 +92,35 @@ func (r *Run) WriteEvents(ch <-chan events.Event) error {
 	return firstErr
 }
 
-func countLines(path string) (int, error) {
-	f, err := os.Open(path) //nolint:gosec // path is inside a run directory
+// countLines counts the lines of the file at path, a cut-off last line
+// included, and reports whether that last line ends with a newline. It
+// counts bytes rather than scanning lines, so no line is too long for it.
+func countLines(path string) (n int, terminated bool, err error) {
+	f, err := OpenRegular(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return 0, nil
+		return 0, true, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer func() { _ = f.Close() }()
-	n := 0
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		n++
+	buf := make([]byte, 64<<10)
+	last := byte('\n')
+	for {
+		k, rerr := f.Read(buf)
+		if k > 0 {
+			n += bytes.Count(buf[:k], []byte{'\n'})
+			last = buf[k-1] //nolint:gosec // k > 0 was checked
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return 0, false, rerr
+		}
 	}
-	return n, sc.Err()
+	if last != '\n' {
+		return n + 1, false, nil
+	}
+	return n, true, nil
 }

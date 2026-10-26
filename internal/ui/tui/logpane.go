@@ -233,6 +233,9 @@ func placeholder(rs *runState, id string) string {
 		}
 		return "no output"
 	case events.Skipped:
+		if st.Err != "" {
+			return fmt.Sprintf("skipped: %s; the output is in %s", st.Err, rs.run.AttemptLogPath(id, st.Attempt))
+		}
 		if st.Attempt == 0 {
 			return "skipped: it succeeded in an earlier attempt"
 		}

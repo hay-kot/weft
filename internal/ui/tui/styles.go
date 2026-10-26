@@ -16,13 +16,9 @@ type Styles struct {
 	Rule       lipgloss.Style
 	Edge       lipgloss.Style
 	EdgeActive lipgloss.Style
-	// Selected marks the selected node's label. Bold and underline stay
-	// visible without color and take no extra columns, so the layout does
-	// not move with the selection.
-	Selected lipgloss.Style
-	Notice   lipgloss.Style
-	Error    lipgloss.Style
-	Help     help.Styles
+	Notice     lipgloss.Style
+	Error      lipgloss.Style
+	Help       help.Styles
 
 	// Dialog boxes and their parts.
 	Dialog         lipgloss.Style
@@ -60,7 +56,6 @@ func DefaultStyles() Styles {
 		Rule:       dim,
 		Edge:       dim,
 		EdgeActive: base.Bold(true),
-		Selected:   base.Bold(true).Underline(true).UnderlineSpaces(true),
 		Notice:     base.Foreground(lipgloss.Yellow),
 		Error:      base.Foreground(lipgloss.Red),
 		Help:       h,
@@ -103,3 +98,12 @@ func (s Styles) State(st events.State) lipgloss.Style {
 		return s.idle
 	}
 }
+
+// selectedOn and selectedOff mark the selected node's label bold and
+// underlined. Both stay visible without color and take no extra columns, so
+// the layout does not move with the selection. They are written as one
+// sequence around the whole label; see glyphClass.render.
+const (
+	selectedOn  = "\x1b[1;4m"
+	selectedOff = "\x1b[0m"
+)

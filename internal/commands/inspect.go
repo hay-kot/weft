@@ -8,7 +8,6 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -52,12 +51,11 @@ func findWorkflowRuns(arg string) (*workflowRuns, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &workflowRuns{
-		arg:  arg,
-		name: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
-		root: root,
-		wf:   nil,
+	name, err := workflow.Name(path)
+	if err != nil {
+		return nil, err
 	}
+	w := &workflowRuns{arg: arg, name: name, root: root, wf: nil}
 	if wf, err := workflow.Load(path, root); err == nil {
 		w.wf = wf
 	}
@@ -132,7 +130,8 @@ Examples:
 				Destination: &cmd.limit,
 			},
 		},
-		Action: cmd.run,
+		Action:        cmd.run,
+		ShellComplete: completeWorkflow,
 	})
 	return app
 }
@@ -242,7 +241,8 @@ Examples:
 				Destination: &cmd.tail,
 			},
 		},
-		Action: cmd.runCmd,
+		Action:        cmd.runCmd,
+		ShellComplete: completeWorkflow,
 	})
 	return app
 }
@@ -315,7 +315,8 @@ Examples:
 				Destination: &cmd.tail,
 			},
 		},
-		Action: cmd.runCmd,
+		Action:        cmd.runCmd,
+		ShellComplete: completeWorkflowThenNode,
 	})
 	return app
 }
@@ -347,9 +348,12 @@ func attemptLog(run *store.Run, node string, attempt int) (string, error) {
 		return "", err
 	}
 	ns, ok := st.Nodes[node]
-	if !ok {
-		ids := slices.Sorted(maps.Keys(st.Nodes))
+	if !ok || !workflow.ValidID(node) {
+		ids := slices.DeleteFunc(slices.Sorted(maps.Keys(st.Nodes)), func(id string) bool { return !workflow.ValidID(id) })
 		return "", fmt.Errorf("run %s has no node %q; its nodes are %s", run.ID, node, strings.Join(ids, ", "))
+	}
+	if ns.Attempt == 0 {
+		return "", fmt.Errorf("%s never ran in run %s (it is %s)", node, run.ID, ns.State)
 	}
 	if attempt == 0 {
 		attempt = ns.Attempt
@@ -377,7 +381,7 @@ func copyLog(out io.Writer, path string, tail int) error {
 		}
 		return nil
 	}
-	f, err := os.Open(path) //nolint:gosec // path is a node log inside a run directory
+	f, err := store.OpenRegular(path)
 	if err != nil {
 		return err
 	}

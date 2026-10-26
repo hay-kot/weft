@@ -2,13 +2,14 @@ package tui
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestLogBufferKeepsNewestLines(t *testing.T) {
-	b := newLogBuffer(3)
+	b := newLogBuffer(3, logBytesCap)
 	assert.Equal(t, 0, b.first())
 	assert.Equal(t, 0, b.end())
 	assert.Nil(t, b.slice(0, 10))
@@ -54,10 +55,29 @@ func TestSanitize(t *testing.T) {
 		{"tab after color counts only text", "\x1b[1mab\x1b[0m\tc", "\x1b[1mab\x1b[0m      c"},
 		{"invalid utf-8 is replaced", "a\xffb", "a�b"},
 		{"unicode passes through", "• building ✓", "• building ✓"},
+		{"combining marks stay", "e\u0301 done", "e\u0301 done"},
+		{"zero width joiners stay", "👨\u200d👩\u200d👧 ok", "👨\u200d👩\u200d👧 ok"},
+		{"bidi override is dropped", "a\u202eb", "ab"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, sanitize(tt.in))
 		})
 	}
+}
+
+func TestLogBufferCapsBytes(t *testing.T) {
+	b := newLogBuffer(100, 25)
+	for i := range 5 {
+		b.append(logLine{Text: strings.Repeat("x", 10) + strconv.Itoa(i), Notice: false})
+	}
+	assert.Equal(t, 5, b.end())
+	assert.Equal(t, 3, b.first(), "only what fits in the byte cap is kept")
+	assert.Equal(t, 2, b.size)
+	assert.LessOrEqual(t, b.bytes, 25)
+
+	b.append(logLine{Text: strings.Repeat("y", 40), Notice: false})
+	assert.Equal(t, 1, b.size, "a line over the cap on its own still stays")
+	assert.Equal(t, 5, b.first())
+	assert.Equal(t, 40, b.bytes)
 }

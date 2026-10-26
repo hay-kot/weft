@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -138,11 +137,14 @@ func (r *Run) WriteState(s *State) error {
 	return nil
 }
 
+// maxStateBytes bounds a state.json read. A real one is a few KB per node.
+const maxStateBytes = 64 << 20
+
 // LoadState reads state.json. It returns an error wrapping ErrNoState when
 // the file does not exist.
 func (r *Run) LoadState() (*State, error) {
 	path := r.StatePath()
-	data, err := os.ReadFile(path) //nolint:gosec // path is inside a run directory weft found itself
+	data, err := readRegular(path, maxStateBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("run %s: %w", r.ID, ErrNoState)
 	}

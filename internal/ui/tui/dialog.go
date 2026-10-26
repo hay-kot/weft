@@ -145,11 +145,11 @@ func (d *dialog) update(k tea.KeyPressMsg, keys KeyMap, width, height int) dialo
 			return dialogNo
 		case key.Matches(k, keys.Left), key.Matches(k, keys.Right), key.Matches(k, keys.NextButton):
 			d.yes = !d.yes
+			return dialogKept
 		}
-		return dialogKept
-	}
-
-	if key.Matches(k, d.closeKeys) {
+		// Other keys scroll: a question on a short screen must still be
+		// readable to the end.
+	} else if key.Matches(k, d.closeKeys) {
 		return dialogClosed
 	}
 	rows := d.bodyRows(width)
@@ -299,20 +299,32 @@ func (d *dialog) overlay(screen string, width, height int) string {
 }
 
 // hangingWrap wraps text to width, indenting every row after the first so
-// a long value lines up under where it started.
+// a long value lines up under where it started. Every row fits in width:
+// ansi.Wrap keeps the space it broke at, and a row wider than the box would
+// wrap again when the box is rendered, making the dialog taller than the
+// layout counted on.
 func hangingWrap(text string, width, indent int) []string {
 	if indent >= width {
 		indent = 0
 	}
 	first := strings.Split(ansi.Wrap(text, width, ""), "\n")
 	if indent == 0 || len(first) == 1 {
-		return first
+		return clampRows(first, width)
 	}
 	rows := []string{first[0]}
 	rest := strings.TrimLeft(ansi.Cut(text, ansi.StringWidth(first[0]), ansi.StringWidth(text)), " ")
 	pad := strings.Repeat(" ", indent)
 	for r := range strings.SplitSeq(ansi.Wrap(rest, width-indent, ""), "\n") {
 		rows = append(rows, pad+r)
+	}
+	return clampRows(rows, width)
+}
+
+func clampRows(rows []string, width int) []string {
+	for i, r := range rows {
+		if ansi.StringWidth(r) > width {
+			rows[i] = ansi.Truncate(r, width, "")
+		}
 	}
 	return rows
 }

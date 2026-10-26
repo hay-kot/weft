@@ -1,11 +1,13 @@
 package workflow
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -76,7 +79,8 @@ func FindRoot(start string) (string, error) {
 // such as "deploy" resolves to `<root>/.weft/deploy.yml`. An argument that
 // looks like a path (it holds a separator or a YAML extension) is used as
 // is; its root is the parent of `.weft` when the file lives in one, and the
-// file's directory otherwise.
+// file's directory otherwise. A bare file name that is not in cwd, such as
+// `deploy.yml` typed at the project root, is looked up in `.weft/` too.
 func Resolve(cwd, arg string) (path, root string, err error) {
 	if strings.ContainsRune(arg, filepath.Separator) || isYAML(arg) {
 		path = filepath.Clean(arg)
@@ -84,6 +88,9 @@ func Resolve(cwd, arg string) (path, root string, err error) {
 			path = filepath.Join(cwd, path)
 		}
 		if _, err := os.Stat(path); err != nil {
+			if p, root, ok := inWeftDir(cwd, arg); ok {
+				return p, root, nil
+			}
 			return "", "", fmt.Errorf("workflow file: %w", err)
 		}
 		root = filepath.Dir(path)
@@ -97,44 +104,97 @@ func Resolve(cwd, arg string) (path, root string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	for _, ext := range []string{".yml", ".yaml"} {
-		p := filepath.Join(root, DirName, arg+ext)
+	dir := filepath.Join(root, DirName)
+	var found []string
+	for _, ext := range yamlExts {
+		p := filepath.Join(dir, arg+ext)
 		if _, err := os.Stat(p); err == nil {
-			return p, root, nil
+			found = append(found, p)
 		}
 	}
-	dir := filepath.Join(root, DirName)
+	switch len(found) {
+	case 1:
+		return found[0], root, nil
+	case 2:
+		return "", "", fmt.Errorf("workflow %q is both %s and %s in %s; keep one", arg, filepath.Base(found[0]), filepath.Base(found[1]), dir)
+	}
 	if names, err := List(root); err == nil && len(names) > 0 {
 		return "", "", fmt.Errorf("workflow %q not found in %s; it has %s", arg, dir, strings.Join(names, ", "))
 	}
 	return "", "", fmt.Errorf("workflow %q not found in %s, which holds no workflow files", arg, dir)
 }
 
-// List returns the names of the workflows in `<root>/.weft`, sorted.
+// inWeftDir finds a bare file name in the nearest `.weft/`.
+func inWeftDir(cwd, name string) (path, root string, ok bool) {
+	if strings.ContainsRune(name, filepath.Separator) {
+		return "", "", false
+	}
+	root, err := FindRoot(cwd)
+	if err != nil {
+		return "", "", false
+	}
+	path = filepath.Join(root, DirName, name)
+	if _, err := os.Stat(path); err != nil {
+		return "", "", false
+	}
+	return path, root, true
+}
+
+var yamlExts = []string{".yml", ".yaml"}
+
+// List returns the names of the workflows in `<root>/.weft`, sorted. A name
+// that has both a .yml and a .yaml file is an error: the two would share a
+// run directory, and `weft run <name>` could only ever mean one of them.
 func List(root string) ([]string, error) {
-	entries, err := os.ReadDir(filepath.Join(root, DirName))
+	dir := filepath.Join(root, DirName)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
+	files := map[string]string{}
 	var names []string
 	for _, e := range entries {
 		if e.IsDir() || !isYAML(e.Name()) {
 			continue
 		}
-		names = append(names, strings.TrimSuffix(e.Name(), filepath.Ext(e.Name())))
+		name, err := Name(e.Name())
+		if err != nil {
+			return nil, err
+		}
+		if other, dup := files[name]; dup {
+			return nil, fmt.Errorf("%s has both %s and %s; a workflow has one file", dir, other, e.Name())
+		}
+		files[name] = e.Name()
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names, nil
 }
 
+// Name returns the workflow name of a file: its base name without the
+// extension. The name is the run directory's name, so a file whose name is
+// only an extension, such as `.yml` or `...yml`, is refused.
+func Name(path string) (string, error) {
+	base := filepath.Base(path)
+	name := strings.TrimSuffix(base, filepath.Ext(base))
+	switch name {
+	case "", ".", "..":
+		return "", fmt.Errorf("%s: a workflow file needs a name before its extension, such as deploy.yml", path)
+	}
+	return name, nil
+}
+
 func isYAML(name string) bool {
-	ext := filepath.Ext(name)
-	return ext == ".yml" || ext == ".yaml"
+	return slices.Contains(yamlExts, filepath.Ext(name))
 }
 
 // Load reads, parses, and validates the workflow file at path. Errors in the
 // file's content come back as a *ValidationError.
 func Load(path, root string) (*Workflow, error) {
+	name, err := Name(path)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path) //nolint:gosec // the path is the workflow the user asked to load
 	if err != nil {
 		return nil, err
@@ -150,7 +210,7 @@ func Load(path, root string) (*Workflow, error) {
 	wf.Hash = hash(data)
 	wf.Path = path
 	wf.Root = root
-	wf.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	wf.Name = name
 	return wf, nil
 }
 
@@ -172,8 +232,9 @@ func hash(data []byte) string {
 // Parse parses and validates workflow YAML. Name, Path, Root, and Hash are
 // left empty.
 func Parse(data []byte) (*Workflow, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
 		return nil, &ValidationError{Path: "", Problems: []string{err.Error()}}
 	}
 	if len(doc.Content) == 0 {
@@ -189,6 +250,17 @@ func Parse(data []byte) (*Workflow, error) {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
+	// A second document would be dropped without a word otherwise, whether
+	// it parses or not.
+	var extra yaml.Node
+	switch err := dec.Decode(&extra); {
+	case err == nil:
+		addf("line %d: a workflow file holds one YAML document; this one has a second", extra.Line)
+	case !errors.Is(err, io.EOF):
+		addf("a workflow file holds one YAML document; this one has a second, which does not parse: %v", err)
+	}
+	rejectAliases(top, addf)
+
 	wf := &Workflow{
 		Name:        "",
 		Path:        "",
@@ -198,36 +270,7 @@ func Parse(data []byte) (*Workflow, error) {
 		Nodes:       nil,
 		index:       map[string]*Node{},
 	}
-	defaultShell := slices.Clone(DefaultShell)
-	var nodes *yaml.Node
-	for i := 0; i+1 < len(top.Content); i += 2 {
-		key, value := top.Content[i], top.Content[i+1]
-		switch key.Value {
-		case "concurrency":
-			var n int
-			switch err := value.Decode(&n); {
-			case err != nil:
-				addf("line %d: concurrency must be a whole number, got %q", value.Line, value.Value)
-			case n < 0:
-				addf("line %d: concurrency must be positive, got %d", value.Line, n)
-			case n > 0:
-				wf.Concurrency = n
-			}
-		case "shell":
-			if value.Kind != yaml.ScalarNode {
-				addf("line %d: shell must be a string such as \"bash -c\"", value.Line)
-				continue
-			}
-			defaultShell = strings.Fields(value.Value)
-			if len(defaultShell) == 0 {
-				addf("line %d: shell must name a program, got %q", value.Line, value.Value)
-			}
-		case "nodes":
-			nodes = value
-		default:
-			addf("line %d: unknown field %q; a workflow has concurrency, shell, and nodes", key.Line, key.Value)
-		}
-	}
+	nodes, defaultShell := parseTop(top, wf, addf)
 
 	nodeYAML := map[string]*yaml.Node{}
 	switch {
@@ -281,6 +324,71 @@ func Parse(data []byte) (*Workflow, error) {
 		return nil, &ValidationError{Path: "", Problems: problems}
 	}
 	return wf, nil
+}
+
+// parseTop reads the top-level fields into wf and returns the nodes mapping
+// and the workflow's default shell.
+func parseTop(top *yaml.Node, wf *Workflow, addf func(string, ...any)) (nodes *yaml.Node, defaultShell []string) {
+	defaultShell = slices.Clone(DefaultShell)
+	seen := map[string]int{}
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		key, value := top.Content[i], top.Content[i+1]
+		// yaml.Node decoding keeps both copies of a repeated key; taking the
+		// last one would lose the first in silence.
+		if line, dup := seen[key.Value]; dup {
+			addf("line %d: %q is already set on line %d", key.Line, key.Value, line)
+			continue
+		}
+		seen[key.Value] = key.Line
+		switch key.Value {
+		case "<<":
+			addf("line %d: YAML merge keys (<<) are not supported", key.Line)
+		case "concurrency":
+			var n int
+			switch err := value.Decode(&n); {
+			case err != nil:
+				addf("line %d: concurrency must be a whole number, got %q", value.Line, value.Value)
+			case n < 0:
+				addf("line %d: concurrency must be positive, got %d", value.Line, n)
+			case n > 0:
+				wf.Concurrency = n
+			}
+		case "shell":
+			if value.Kind != yaml.ScalarNode {
+				addf("line %d: shell must be a string such as \"bash -c\"", value.Line)
+				continue
+			}
+			defaultShell = strings.Fields(value.Value)
+			if len(defaultShell) == 0 {
+				addf("line %d: shell must name a program, got %q", value.Line, value.Value)
+			}
+		case "nodes":
+			nodes = value
+		default:
+			addf("line %d: unknown field %q; a workflow has concurrency, shell, and nodes", key.Line, key.Value)
+		}
+	}
+	return nodes, defaultShell
+}
+
+// ValidID reports whether id is a well-formed node ID. Node IDs name
+// directories under the run directory, so anything that reads one back from
+// disk checks it again.
+func ValidID(id string) bool {
+	return idPattern.MatchString(id)
+}
+
+// rejectAliases reports every alias in the tree. Node fields are read from
+// yaml.Node shapes, which an alias does not have, so `*base` would surface
+// as a confusing "must be a mapping" or "unknown field" otherwise.
+func rejectAliases(n *yaml.Node, addf func(string, ...any)) {
+	if n.Kind == yaml.AliasNode {
+		addf("line %d: YAML anchors and aliases (*%s) are not supported; write the fields out", n.Line, n.Value)
+		return
+	}
+	for _, c := range n.Content {
+		rejectAliases(c, addf)
+	}
 }
 
 // needLine returns the line of the i-th entry in a node's needs.
@@ -362,6 +470,10 @@ func parseNode(id string, line int, value *yaml.Node, defaultShell []string) (*N
 	lines := map[string]int{}
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		k, v := value.Content[i], value.Content[i+1]
+		if k.Value == "<<" {
+			addf(k.Line, "YAML merge keys (<<) are not supported; write the fields out")
+			continue
+		}
 		kind, known := nodeFields[k.Value]
 		if !known {
 			addf(k.Line, "unknown field %q", k.Value)
@@ -373,6 +485,14 @@ func parseNode(id string, line int, value *yaml.Node, defaultShell []string) (*N
 		lines[k.Value] = v.Line
 	}
 	if len(problems) > 0 {
+		// Keep a well-formed needs list so its entries are still checked;
+		// otherwise an unknown need only shows up once the other problems
+		// are fixed.
+		if needs := fieldValue(value, "needs"); needs != nil && kindProblem("needs", kindList, needs) == "" {
+			for _, item := range needs.Content {
+				node.Needs = append(node.Needs, item.Value)
+			}
+		}
 		return node, problems
 	}
 
@@ -382,7 +502,12 @@ func parseNode(id string, line int, value *yaml.Node, defaultShell []string) (*N
 		return node, problems
 	}
 
-	node.Label = raw.Label
+	// The label is drawn into one row of the TUI and printed by status; a
+	// newline from a block scalar or an escape code would break both.
+	node.Label = strings.TrimSpace(raw.Label)
+	if strings.ContainsFunc(node.Label, unicode.IsControl) {
+		addf(lines["label"], "label must be one line without control characters")
+	}
 	node.Run = raw.Run
 	node.Needs = raw.Needs
 	node.Dir = raw.Dir

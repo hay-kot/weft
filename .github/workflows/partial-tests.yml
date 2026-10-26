@@ -12,6 +12,9 @@ jobs:
       - name: Install tools
         uses: jdx/mise-action@v5
 
+      - name: go mod tidy leaves go.mod and go.sum unchanged
+        run: mise run tidy:check
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:

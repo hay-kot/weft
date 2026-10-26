@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -245,4 +248,108 @@ func TestInUse(t *testing.T) {
 	relock, err := run.Lock()
 	require.NoError(t, err, "probing must not leave the run locked")
 	relock.Release()
+}
+
+func TestLockWaitsOutAShortHold(t *testing.T) {
+	t.Parallel()
+
+	run := mustCreate(t, t.TempDir(), time.Now())
+	// A status reader's probe: a shared lock from another descriptor, held
+	// for a moment.
+	probe, err := os.OpenFile(filepath.Join(run.Dir, store.LockFile), os.O_RDWR|os.O_CREATE, 0o600)
+	require.NoError(t, err)
+	require.NoError(t, syscall.Flock(int(probe.Fd()), syscall.LOCK_SH))
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = syscall.Flock(int(probe.Fd()), syscall.LOCK_UN)
+		_ = probe.Close()
+	}()
+
+	lock, err := run.Lock()
+	require.NoError(t, err, "a probe's hold is waited out, not reported as another weft")
+	lock.Release()
+}
+
+func TestReleaseClearsThePID(t *testing.T) {
+	t.Parallel()
+
+	run := mustCreate(t, t.TempDir(), time.Now())
+	lock, err := run.Lock()
+	require.NoError(t, err)
+	path := filepath.Join(run.Dir, store.LockFile)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, strconv.Itoa(os.Getpid())+"\n", string(data))
+
+	lock.Release()
+	data, err = os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Empty(t, data, "a stale PID must not name a holder nobody is")
+}
+
+func TestWriteEventsEndsATornLine(t *testing.T) {
+	t.Parallel()
+
+	run := mustCreate(t, t.TempDir(), time.Now())
+	torn := `{"seq":1,"time":"t","type":"run_started","event":{}}` + "\n" + `{"seq":2,"ty`
+	require.NoError(t, os.WriteFile(run.EventsPath(), []byte(torn), 0o600))
+
+	ch := make(chan events.Event, 1)
+	ch <- events.RunFinished{Success: true, At: time.Time{}}
+	close(ch)
+	require.NoError(t, run.WriteEvents(ch))
+
+	data, err := os.ReadFile(run.EventsPath())
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Len(t, lines, 3)
+	assert.Equal(t, `{"seq":2,"ty`, lines[1], "the cut-off record stays on its own line")
+	assert.Contains(t, lines[2], `"seq":3`, "the cut-off record took a seq")
+}
+
+func TestOpenRejectsABadSuffix(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	run := mustCreate(t, root, time.Now())
+	for _, id := range []string{run.ID[:len(run.ID)-4] + "zzzz", run.ID[:len(run.ID)-4] + "/../"} {
+		_, err := store.Open(root, "deploy", id)
+		require.ErrorContains(t, err, "is not a run ID", id)
+	}
+	_, err := store.Open(root, "deploy", run.ID)
+	require.NoError(t, err)
+}
+
+func TestRunFilesMustBeRegular(t *testing.T) {
+	t.Parallel()
+
+	run := mustCreate(t, t.TempDir(), time.Now())
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	require.NoError(t, os.WriteFile(elsewhere, []byte("{}"), 0o600))
+	require.NoError(t, os.Symlink(elsewhere, run.StatePath()))
+	require.NoError(t, os.Symlink(elsewhere, run.LogPath()))
+	require.NoError(t, os.Symlink(elsewhere, run.EventsPath()))
+
+	_, err := run.LoadState()
+	require.ErrorContains(t, err, "is not a regular file")
+	_, err = run.OpenLog()
+	require.ErrorContains(t, err, "is not a regular file")
+	_, err = store.OpenRegular(run.StatePath())
+	require.ErrorContains(t, err, "is not a regular file")
+	ch := make(chan events.Event)
+	close(ch)
+	require.ErrorContains(t, run.WriteEvents(ch), "is not a regular file")
+}
+
+func TestOpenLogTightensTheMode(t *testing.T) {
+	t.Parallel()
+
+	run := mustCreate(t, t.TempDir(), time.Now())
+	require.NoError(t, os.WriteFile(run.LogPath(), []byte("old\n"), 0o644))
+	f, err := run.OpenLog()
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	info, err := os.Stat(run.LogPath())
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
