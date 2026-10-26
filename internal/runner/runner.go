@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/hay-kot/weft/internal/term"
 )
 
 // TermGrace is how long a node gets after SIGTERM before SIGKILL.
@@ -115,7 +117,7 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 	var output *outputPipe
 	if spec.Interactive {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		if isTerminal(os.Stdin) {
+		if term.IsTerminal(os.Stdin) {
 			foreground = true
 			cmd.SysProcAttr.Foreground = true
 			cmd.SysProcAttr.Ctty = int(os.Stdin.Fd())

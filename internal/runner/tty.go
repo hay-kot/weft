@@ -8,16 +8,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// IsTerminal reports whether f is a terminal.
-func IsTerminal(f *os.File) bool {
-	return isTerminal(f)
-}
-
-func isTerminal(f *os.File) bool {
-	_, err := unix.IoctlGetTermios(int(f.Fd()), ioctlGetTermios)
-	return err == nil
-}
-
 // reclaimForeground makes weft's process group the terminal's foreground
 // group again after an interactive child held it. weft is a background
 // process at this point, so tcsetpgrp would raise SIGTTOU and stop weft

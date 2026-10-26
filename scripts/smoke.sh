@@ -35,7 +35,9 @@ start() {
   tm new-session -d -s smoke -x "$w" -y "$h" -c "$repo" "$*"
 }
 
-capture() { tm capture-pane -p -t smoke; }
+# When a pane's command exits under remain-on-exit, tmux scrolls its first
+# line into history, so captures include history.
+capture() { tm capture-pane -p -S - -t smoke; }
 
 # wait_for <pattern> [seconds]: wait until the pane shows a fixed string.
 wait_for() {
@@ -94,6 +96,7 @@ scenario_plain_success() {
   expect prompt "tofu-apply: stdin is a terminal"
   expect final "tofu-apply: applied (stub)"
   expect final "succeeded (7 succeeded)"
+  expect final "weft: run 20"
   expect final "weft: run dir "
   local run
   run=$(latest_run)
@@ -218,7 +221,41 @@ scenario_plain_closed_stdout() {
   grep -q '"message":"run finished"' "$(latest_run)/weft.log" || fail "run did not finish after stdout closed"
 }
 
-all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty plain_stalled_output plain_closed_stdout)
+# weft graph sizes itself to the real terminal: horizontal when it fits,
+# vertical when it doesn't.
+scenario_graph_wide() {
+  start 160 45 "$(weft "$bin" graph "$fixture")"
+  local status
+  status=$(wait_exit 10)
+  save final
+  expect_status "$status" 0
+  expect final "guard ─┼─▸ ui-check ──┼─▸ release ───▸ deploy ───▸ tofu-apply"
+  expect final "┌─▸ go-check ──┐"
+  expect final "└─▸ db-backup ─┘"
+}
+
+scenario_graph_narrow() {
+  start 40 24 "$(weft "$bin" graph "$fixture")"
+  local status
+  status=$(wait_exit 10)
+  save final
+  expect_status "$status" 0
+  expect final "           guard"
+  expect final "go-check  ui-check  db-backup"
+  expect final "▾"
+  expect_not final "▸"
+}
+
+scenario_graph_forced_horizontal() {
+  start 40 24 "$(weft "$bin" graph --layout horizontal "$fixture")"
+  local status
+  status=$(wait_exit 10)
+  save final
+  expect_status "$status" 0
+  expect final "─┼─▸"
+}
+
+all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty plain_stalled_output plain_closed_stdout graph_wide graph_narrow graph_forced_horizontal)
 
 log "building weft into $out"
 (cd "$repo" && go build -o "$bin" .)

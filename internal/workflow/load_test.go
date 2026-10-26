@@ -132,6 +132,18 @@ nodes:
 			want: []string{`node "a" needs itself`},
 		},
 		{
+			name: "duplicate need",
+			src: `
+nodes:
+  a:
+    run: echo a
+  b:
+    run: echo b
+    needs: [a, a]
+`,
+			want: []string{`node "b" lists "a" twice in needs`},
+		},
+		{
 			name: "cycle",
 			src: `
 nodes:

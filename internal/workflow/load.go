@@ -215,7 +215,11 @@ func Parse(data []byte) (*Workflow, error) {
 	}
 
 	for _, n := range wf.Nodes {
-		for _, need := range n.Needs {
+		for i, need := range n.Needs {
+			if slices.Contains(n.Needs[:i], need) {
+				addf("node %q lists %q twice in needs", n.ID, need)
+				continue
+			}
 			switch {
 			case need == n.ID:
 				addf("node %q needs itself", n.ID)

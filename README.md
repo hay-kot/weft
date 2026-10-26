@@ -101,6 +101,21 @@ weft graph <workflow>      print the workflow's graph
 
 `<workflow>` is a name (`deploy`) or a path to a workflow file.
 
+`weft graph` prints the layered graph the run view uses:
+
+```text
+       ┌─▸ go-check ──┐
+guard ─┼─▸ ui-check ──┼─▸ release ───▸ deploy ───▸ tofu-apply
+       └─▸ db-backup ─┘
+```
+
+Levels run left to right. When that is wider than the terminal, they run
+top to bottom instead. `--layout=horizontal|vertical` forces one, `--width`
+sets the width to fit (default: the terminal's), and `--json` prints nodes,
+levels, and the drawn lines. Where many nodes fan into many, edges share a
+trunk, so the drawing can suggest an edge that isn't there; `needs` in the
+file is the source of truth.
+
 `weft run` flags:
 
 | Flag | Meaning |

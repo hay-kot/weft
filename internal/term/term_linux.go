@@ -1,4 +1,4 @@
-package runner
+package term
 
 import "golang.org/x/sys/unix"
 

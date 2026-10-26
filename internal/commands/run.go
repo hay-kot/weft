@@ -21,6 +21,7 @@ import (
 	"github.com/hay-kot/weft/internal/events"
 	"github.com/hay-kot/weft/internal/runner"
 	"github.com/hay-kot/weft/internal/store"
+	"github.com/hay-kot/weft/internal/term"
 	"github.com/hay-kot/weft/internal/ui/plain"
 	"github.com/hay-kot/weft/internal/workflow"
 )
@@ -128,7 +129,7 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 		return err
 	}
 
-	stdoutTTY := runner.IsTerminal(os.Stdout)
+	stdoutTTY := term.IsTerminal(os.Stdout)
 	color := stdoutTTY && !cmd.flags.NoColor
 	_, _ = fmt.Fprintf(stderr, "weft: run %s\nweft: run dir %s\n", run.ID, run.Dir)
 

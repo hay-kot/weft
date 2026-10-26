@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/hay-kot/weft/internal/events"
-	"github.com/hay-kot/weft/internal/runner"
+	"github.com/hay-kot/weft/internal/term"
 )
 
 // syncTimeout bounds how long an interactive node waits for earlier status
@@ -27,7 +27,7 @@ type Lender struct {
 
 // Lend runs fn when stdin is a terminal and returns ErrNoTerminal otherwise.
 func (l Lender) Lend(fn func()) error {
-	if !runner.IsTerminal(os.Stdin) {
+	if !term.IsTerminal(os.Stdin) {
 		return ErrNoTerminal
 	}
 	if l.Sub != nil {
