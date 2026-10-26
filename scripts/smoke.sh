@@ -523,22 +523,59 @@ scenario_tui_kill() {
   if grep -q "lock released" "$run/nodes/db-backup/1.log"; then fail "db-backup finished its cleanup despite the kill"; fi
 }
 
-# q during a run asks first. Any other key keeps the run going; y cancels
+# ? and i open dialogs over the running screen, which keeps its frame, and
+# esc and i close them again.
+scenario_tui_dialogs() {
+  start 160 45 "$(tui WEFT_FIXTURE_HANG=db-backup --)"
+  wait_screen "db-backup" || return
+  tm send-keys -t smoke '?'
+  wait_screen "Keyboard shortcuts" 5 || return
+  save_screen help
+  check_frame help 160 45
+  expect help "rerun it and everything downstream"
+  tm send-keys -t smoke Escape
+  sleep 0.3
+  save_screen closed
+  expect_not closed "Keyboard shortcuts"
+  tm send-keys -t smoke i
+  wait_screen "needed by" 5 || return
+  save_screen info
+  check_frame info 160 45
+  expect info "kill_timeout"
+  tm send-keys -t smoke i
+  sleep 0.3
+  save_screen info_closed
+  expect_not info_closed "needed by"
+  tm send-keys -t smoke q
+  wait_screen "Quit while the run is going?" 5 || return
+  tm send-keys -t smoke y
+  check_restored
+  local status
+  status=$(wait_exit 20)
+  expect_status "$status" 1
+}
+
+# q during a run asks first in a dialog. n keeps the run going; y cancels
 # it and weft quits once the nodes stop.
 scenario_tui_quit_confirm() {
   start 160 45 "$(tui WEFT_FIXTURE_HANG=db-backup --)"
   wait_screen "db-backup" || return
   tm send-keys -t smoke q
-  wait_screen "Press y to cancel it and quit" 5 || return
+  wait_screen "Quit while the run is going?" 5 || return
   save_screen confirm
   check_frame confirm 160 45
+  expect confirm "Cancel run and quit"
+  tm send-keys -t smoke j
+  sleep 0.3
+  save_screen stray
+  expect stray "Quit while the run is going?"
   tm send-keys -t smoke n
   sleep 0.5
   save_screen kept
   expect kept "deploy  running"
-  expect_not kept "Press y"
+  expect_not kept "Quit while the run is going?"
   tm send-keys -t smoke q
-  wait_screen "Press y to cancel it and quit" 5 || return
+  wait_screen "Quit while the run is going?" 5 || return
   tm send-keys -t smoke y
   check_restored
   local status
@@ -723,7 +760,7 @@ scenario_tui_no_tty() {
 }
 
 all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty plain_stalled_output plain_closed_stdout graph_wide graph_narrow graph_forced_horizontal
-  tui_success tui_narrow_fail tui_resize tui_cancel tui_kill tui_quit_confirm tui_exit_on_end
+  tui_success tui_narrow_fail tui_resize tui_cancel tui_kill tui_quit_confirm tui_dialogs tui_exit_on_end
   tui_interactive_cancel tui_flood tui_no_tty plain_resume plain_only plain_status tui_resume tui_rerun tui_node_cancel)
 
 log "building weft into $out"

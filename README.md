@@ -131,9 +131,19 @@ failure) until you move it. Keys:
 | `x` | Cancel the selected node: SIGINT and its `kill_timeout` if it runs, again to kill it. Nodes that need it are blocked; the rest of the run goes on |
 | `f` | Pause or resume following the log's newest lines |
 | `v` | Switch between the horizontal and vertical graph |
+| `i` | Details of the selected node: needs, what needs it, command, dir, shell, timeouts, and its latest attempt with exit code and log path |
 | `ctrl+c` | Cancel the run; again to kill the running nodes |
-| `q` | Quit. During a run it asks first, and `y` cancels the run and quits once the nodes stop |
-| `?` | Show every key |
+| `q` | Quit. During a run it asks first, and Yes cancels the run and quits once the nodes stop |
+| `?` | A dialog with every key of the current view, in sections |
+
+Help, node details, and questions open as dialogs over the screen. The
+help and the details scroll with `j` `k` when they are taller than the
+screen and close with `esc`. A question (quitting mid-run, starting or
+rerunning after the workflow file or git HEAD changed) has Yes and No
+buttons: `y` and `n` answer it, `←` `→` or `tab` and `enter` pick a button,
+and No is selected first. Other keys do nothing until it is answered.
+`ctrl+c` still cancels the run, and before the run starts it quits without
+starting.
 
 In the full-screen log, `j` `k` scroll by a line and `h` `l` scroll
 sideways through long lines. The TUI keeps the last 10,000 lines of each

@@ -85,7 +85,7 @@ func TestRerunAfterTheRunEnds(t *testing.T) {
 	assert.True(t, m.ticking)
 	require.NotNil(t, cmd, "the clock restarts")
 	assert.Equal(t, phaseRunning, runPhase(m.rs, m.cancelLevel))
-	short, _ := m.footerHelp()
+	short := m.footerHelp()
 	assert.True(t, short[2].Enabled(), "ctrl+c cancel shows again")
 	assert.Equal(t, 2, m.rs.nodes[nDeploy].Attempt)
 
@@ -164,7 +164,8 @@ func TestRerunAsksWhenHeadMoved(t *testing.T) {
 	m, cmd := update(t, m, press("R"))
 	m = send(t, m, runCmd(cmd)...)
 	assert.Equal(t, askRerun, m.ask.kind)
-	assert.Equal(t, "Since this run last started, git HEAD moved from aaa to bbb. y reruns deploy anyway, any other key skips it.", m.footer.notice)
+	require.NotNil(t, m.dialog)
+	assert.Equal(t, "Since this run last started, git HEAD moved from aaa to bbb. Rerun deploy and everything downstream of it anyway?", m.dialog.body[0].text)
 
 	t.Run("y reruns with force", func(t *testing.T) {
 		m, cmd := update(t, m, press("y"))
@@ -173,7 +174,7 @@ func TestRerunAsksWhenHeadMoved(t *testing.T) {
 		assert.Equal(t, rerunCall{node: nDeploy, downstream: true, force: true}, fr.calls[len(fr.calls)-1])
 		assert.Equal(t, "rerunning deploy and everything downstream of it", m.footer.notice)
 	})
-	t.Run("any other key skips it", func(t *testing.T) {
+	t.Run("n skips it", func(t *testing.T) {
 		before := len(fr.calls)
 		m, cmd := update(t, m, press("n"))
 		assert.Nil(t, cmd)
@@ -184,7 +185,7 @@ func TestRerunAsksWhenHeadMoved(t *testing.T) {
 	t.Run("the question outlasts the end of a pass", func(t *testing.T) {
 		m := send(t, m, ev(finished(false, 20)))
 		assert.Equal(t, askRerun, m.ask.kind)
-		assert.Contains(t, m.footer.notice, "y reruns deploy anyway")
+		assert.NotNil(t, m.dialog)
 	})
 }
 
@@ -196,7 +197,7 @@ func newConfirmModel(t *testing.T, started *int) Model {
 		ExitOnEnd: false,
 		Interrupt: func() int { return 1 },
 		Plan:      nil,
-		Confirm:   "Since run x last started, git HEAD moved from a to b. Go ahead anyway? y goes ahead, any other key quits.",
+		Confirm:   "Since run x last started, git HEAD moved from a to b.",
 		Start:     func() { *started++ },
 		Rerun:     nil,
 		Notice:    "--resume continues run x",
@@ -210,13 +211,29 @@ func TestConfirmBeforeStart(t *testing.T) {
 		n := 0
 		m := newConfirmModel(t, &n)
 		assert.Equal(t, askStart, m.ask.kind)
-		assert.Contains(t, m.footer.notice, "Go ahead anyway?")
+		assert.Contains(t, screen(m), "Start anyway?")
+		assert.Contains(t, screen(m), "git HEAD moved from a to b.")
 		m, cmd := update(t, m, press("y"))
 		runCmd(cmd)
 		assert.Equal(t, 1, n)
 		assert.Equal(t, "--resume continues run x", m.footer.notice)
 	})
-	t.Run("any other key quits without starting", func(t *testing.T) {
+	t.Run("a stray key keeps asking", func(t *testing.T) {
+		n := 0
+		m := newConfirmModel(t, &n)
+		m, cmd := update(t, m, press("j"))
+		assert.Nil(t, cmd)
+		assert.Equal(t, askStart, m.ask.kind)
+	})
+	t.Run("tab and enter choose a button", func(t *testing.T) {
+		n := 0
+		m := newConfirmModel(t, &n)
+		m = send(t, m, press("tab"))
+		_, cmd := update(t, m, press("enter"))
+		runCmd(cmd)
+		assert.Equal(t, 1, n, "tab moved the selection to Start")
+	})
+	t.Run("n quits without starting", func(t *testing.T) {
 		n := 0
 		m := newConfirmModel(t, &n)
 		_, cmd := update(t, m, press("n"))

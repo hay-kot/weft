@@ -274,13 +274,20 @@ func TestQuitDuringRunAsksFirst(t *testing.T) {
 	m, cmd := update(t, m, press("q"))
 	assert.Nil(t, cmd)
 	assert.Equal(t, askQuit, m.ask.kind)
-	assert.Contains(t, m.footer.notice, "Press y to cancel it and quit")
+	require.NotNil(t, m.dialog)
+	assert.Equal(t, "Quit while the run is going?", m.dialog.title)
+	assert.Contains(t, screen(m), "Cancel run and quit")
 
-	m, cmd = update(t, m, press("n"))
+	m, cmd = update(t, m, press("j"))
 	assert.Nil(t, cmd)
+	assert.NotNil(t, m.dialog, "a key the dialog does not use keeps it open")
+	assert.Equal(t, nRelease, m.graph.selected, "and does not reach the graph")
+
+	m, cmd = update(t, m, press("enter"))
+	assert.Nil(t, cmd, "enter picks the selected button, which starts on No")
+	assert.Nil(t, m.dialog)
 	assert.Equal(t, askNone, m.ask.kind)
 	assert.Empty(t, m.footer.notice)
-	assert.Equal(t, nRelease, m.graph.selected, "the dismissing key does nothing else")
 
 	m = send(t, m, press("q"))
 	m, cmd = update(t, m, press("y"))
@@ -339,12 +346,60 @@ func TestFullScreenLog(t *testing.T) {
 	assert.Equal(t, askNone, m.ask.kind, "and does not ask to quit")
 }
 
-func TestHelpToggle(t *testing.T) {
+func TestHelpDialog(t *testing.T) {
 	m, _ := newModel(t, 160, 45)
-	short := m.pane.height
 	m = send(t, m, press("?"))
-	assert.True(t, m.footer.showAll)
-	assert.Less(t, m.pane.height, short, "the full help takes rows from the log")
+	require.NotNil(t, m.dialog)
+	out := screen(m)
+	assert.Contains(t, out, "Keyboard shortcuts")
+	assert.Contains(t, out, "rerun it and everything downstream")
+	assert.Contains(t, out, "release", "the graph shows around the dialog")
+
+	before := m.graph.selected
+	m = send(t, m, press("j"))
+	assert.Equal(t, before, m.graph.selected, "keys scroll the help, not the graph")
+	m = send(t, m, press("?"))
+	assert.Nil(t, m.dialog, "? closes it again")
+
+	m = send(t, m, press("enter"), press("?"))
+	require.NotNil(t, m.dialog)
+	assert.Contains(t, screen(m), "back to the graph", "the log view has its own help")
+	m = send(t, m, press("esc"))
+	assert.Nil(t, m.dialog)
+	assert.True(t, m.viewOpen, "esc closes the help, not the log")
+}
+
+func TestHelpDialogScrolls(t *testing.T) {
+	m, _ := newModel(t, 60, 14)
+	m = send(t, m, press("?"))
+	require.NotNil(t, m.dialog)
+	assert.Contains(t, screen(m), "Keyboard shortcuts (")
+	assert.NotContains(t, screen(m), "show or hide this help", "the last row is below the fold")
+	m = send(t, m, press("G"))
+	assert.Contains(t, screen(m), "show or hide this help")
+	assert.Contains(t, screen(m), "(100%)")
+}
+
+func TestNodeInfoDialog(t *testing.T) {
+	m, _ := newModel(t, 160, 45)
+	m = send(t, m, checksPassed(), deployFailed(), press("i"))
+	require.NotNil(t, m.dialog)
+	out := screen(m)
+	assert.Equal(t, nDeploy, m.dialog.title, "the failed node, which the end selects")
+	for _, want := range []string{"needs             release", "needed by         tofu-apply", "kill_timeout      30s", "exit code         1"} {
+		assert.Contains(t, out, want)
+	}
+	m = send(t, m, press("i"))
+	assert.Nil(t, m.dialog)
+}
+
+func TestCtrlCThroughADialog(t *testing.T) {
+	m, fi := newModel(t, 160, 45)
+	m = send(t, m, checksPassed(), press("?"))
+	m, cmd := update(t, m, press("ctrl+c"))
+	assert.Nil(t, m.dialog, "ctrl+c closes the help")
+	runCmd(cmd)
+	assert.Equal(t, 1, fi.calls, "and still cancels the run")
 }
 
 // TestViewFillsTheScreenExactly is the guard against screen corruption: at
@@ -449,4 +504,29 @@ func TestHeaderKeepsCountsAndDirLabelWhenNarrow(t *testing.T) {
 	assert.NotContains(t, rows[0], "run 2026", "the run ID gives way first")
 	assert.True(t, strings.HasPrefix(rows[1], " run dir …"), rows[1])
 	assert.True(t, strings.HasSuffix(rows[1], testRun().ID), rows[1])
+}
+
+func TestGoldenHelpDialog(t *testing.T) {
+	m, _ := newModel(t, 100, 40)
+	m = send(t, m, checksPassed(), press("?"))
+	golden.RequireEqual(t, screen(m))
+}
+
+func TestGoldenQuitDialog(t *testing.T) {
+	m, _ := newModel(t, 80, 24)
+	m = send(t, m, checksPassed(), press("q"))
+	golden.RequireEqual(t, screen(m))
+}
+
+func TestGoldenNodeInfoDialog(t *testing.T) {
+	m, _ := newModel(t, 120, 45)
+	m = send(t, m, checksPassed(), deployFailed(), press("i"))
+	golden.RequireEqual(t, screen(m))
+}
+
+func TestHangingWrap(t *testing.T) {
+	assert.Equal(t, []string{"log  /a/b"}, hangingWrap("log  /a/b", 20, 5))
+	assert.Equal(t, []string{"dir  one two", "     three four"}, hangingWrap("dir  one two three four", 15, 5))
+	assert.Equal(t, []string{"run", "     aaaaaaa", "     bbbbbbb", "     ccc"}, hangingWrap("run  aaaaaaabbbbbbbccc", 12, 5),
+		"a word too long for the first row starts on the next and breaks there")
 }

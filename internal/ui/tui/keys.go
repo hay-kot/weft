@@ -25,7 +25,13 @@ type KeyMap struct {
 	Cancel     key.Binding
 	Quit       key.Binding
 	Help       key.Binding
+	// Info opens the selected node's details.
+	Info key.Binding
+	// Confirm, Decline, Choose, and NextButton answer a question dialog.
 	Confirm    key.Binding
+	Decline    key.Binding
+	Choose     key.Binding
+	NextButton key.Binding
 }
 
 // DefaultKeyMap returns the standard bindings.
@@ -51,7 +57,11 @@ func DefaultKeyMap() KeyMap {
 		Cancel:     key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel")),
 		Quit:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Confirm:    key.NewBinding(key.WithKeys("y", "Y")),
+		Info:       key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
+		Confirm:    key.NewBinding(key.WithKeys("y", "Y"), key.WithHelp("y", "yes")),
+		Decline:    key.NewBinding(key.WithKeys("n", "N", "esc"), key.WithHelp("n/esc", "no")),
+		Choose:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "choose")),
+		NextButton: key.NewBinding(key.WithKeys("tab", "shift+tab"), key.WithHelp("tab", "switch")),
 	}
 }
 
@@ -64,21 +74,90 @@ func (k KeyMap) mainHelp(running bool) []key.Binding {
 	cancel, cancelNode := k.Cancel, k.CancelNode
 	cancel.SetEnabled(running)
 	cancelNode.SetEnabled(running)
-	return []key.Binding{selectHelp, k.Open, cancel, k.Quit, k.Help, k.Rerun, k.RerunAll, cancelNode, k.Follow, k.Layout}
-}
-
-// mainFullHelp is the expanded help for the graph view.
-func (k KeyMap) mainFullHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.Left, k.Right, k.Up, k.Down},
-		{k.Open, k.Layout, k.Follow, k.PageUp, k.PageDown},
-		{k.Rerun, k.RerunAll, k.CancelNode, k.Cancel, k.Quit, k.Help},
-	}
+	return []key.Binding{selectHelp, k.Open, cancel, k.Quit, k.Help, k.Rerun, k.RerunAll, cancelNode, k.Info, k.Follow, k.Layout}
 }
 
 // logHelp is the short help for the full-screen log.
 func (k KeyMap) logHelp() []key.Binding {
 	scroll := key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "scroll"))
 	jump := key.NewBinding(key.WithKeys("g", "G"), key.WithHelp("g/G", "top/bottom"))
-	return []key.Binding{k.Close, scroll, k.PageDown, jump, k.ScrollL, k.Follow}
+	return []key.Binding{k.Close, scroll, k.PageDown, jump, k.ScrollL, k.Follow, k.Help}
+}
+
+// helpEntry is one row of the help dialog. The key comes from the binding,
+// so the help can't name a key the TUI does not handle; the description
+// has room to say more than the footer's.
+type helpEntry struct {
+	binding key.Binding
+	desc    string
+}
+
+// helpSection is a titled group of help rows.
+type helpSection struct {
+	title   string
+	entries []helpEntry
+}
+
+// graphHelp is the help for the graph view.
+func (k KeyMap) graphHelp() []helpSection {
+	return []helpSection{
+		{"Graph", []helpEntry{
+			{selectHelp, "select the node in that direction"},
+			{k.Layout, "switch between horizontal and vertical"},
+			{k.Info, "details of the selected node"},
+		}},
+		{"Log", []helpEntry{
+			{k.Open, "open the selected node's log full screen"},
+			{k.PageUp, "scroll the log pane up"},
+			{k.PageDown, "scroll the log pane down"},
+			{k.Top, "go to the start of the log"},
+			{k.Bottom, "go to the end of the log"},
+			{k.Follow, "follow new output, or stop following"},
+		}},
+		{"Run", []helpEntry{
+			{k.Rerun, "rerun the selected node"},
+			{k.RerunAll, "rerun it and everything downstream"},
+			{k.CancelNode, "cancel the selected node; again kills it"},
+			{k.Cancel, "cancel the run; again kills every node"},
+			{k.Quit, "quit; asks first while the run is going"},
+		}},
+		k.generalHelp(),
+	}
+}
+
+// logViewHelp is the help for the full-screen log.
+func (k KeyMap) logViewHelp() []helpSection {
+	scroll := key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "scroll"))
+	return []helpSection{
+		{"Log", []helpEntry{
+			{scroll, "scroll one line"},
+			{k.PageUp, "scroll up a page"},
+			{k.PageDown, "scroll down a page"},
+			{k.Top, "go to the start"},
+			{k.Bottom, "go to the end"},
+			{k.ScrollL, "scroll long lines sideways"},
+			{k.Follow, "follow new output, or stop following"},
+			{k.Close, "back to the graph"},
+		}},
+		{"Run", []helpEntry{
+			{k.Cancel, "cancel the run; again kills every node"},
+		}},
+		k.generalHelp(),
+	}
+}
+
+// helpClose closes the help dialog.
+func (k KeyMap) helpClose() key.Binding {
+	return key.NewBinding(key.WithKeys("esc", "?", "q"), key.WithHelp("esc/?", "close"))
+}
+
+// infoClose closes the node info dialog.
+func (k KeyMap) infoClose() key.Binding {
+	return key.NewBinding(key.WithKeys("esc", "i", "q", "enter"), key.WithHelp("esc/i", "close"))
+}
+
+func (k KeyMap) generalHelp() helpSection {
+	return helpSection{"Help", []helpEntry{
+		{k.Help, "show or hide this help"},
+	}}
 }

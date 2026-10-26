@@ -197,9 +197,8 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 		if mode != uiTUI {
 			return driftError(cmd.sel, run.ID, prep.drift)
 		}
-		// The header shows the run ID, so the question leaves it out and
-		// keeps the answer keys on screen.
-		confirm = fmt.Sprintf("Since this run last started, %s. y goes ahead, any other key quits.",
+		// The header shows the run ID, so the question leaves it out.
+		confirm = fmt.Sprintf("Since this run last started, %s. Starting now runs the rest of it with what is checked out today.",
 			strings.Join(prep.drift, " and "))
 	}
 

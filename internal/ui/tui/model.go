@@ -39,10 +39,10 @@ type Options struct {
 	Interrupt func() int
 	// Plan, when set, is where nodes start before the first events arrive.
 	Plan *plan.Plan
-	// Confirm, when set, is a question shown before the run starts. y calls
-	// Start; any other key quits without starting.
+	// Confirm, when set, is shown in a dialog before the run starts. Yes
+	// calls Start; No, esc, or ctrl+c quits without starting.
 	Confirm string
-	// Start starts the run once Confirm is answered with y.
+	// Start starts the run once Confirm is answered yes.
 	Start func()
 	// Rerun reruns a node, with everything downstream of it when
 	// downstream is set. Unless force is set it may return a
@@ -107,7 +107,7 @@ type (
 	}
 )
 
-// askKind is what a footer question is about.
+// askKind is what a question dialog is about.
 type askKind int
 
 const (
@@ -120,7 +120,7 @@ const (
 	askRerun
 )
 
-// question is the footer question waiting for an answer.
+// question is the question waiting for an answer in a dialog.
 type question struct {
 	kind       askKind
 	node       string
@@ -147,9 +147,11 @@ type Model struct {
 
 	viewOpen bool
 	// auto makes the selection follow the run until the user moves it.
-	auto         bool
-	cancelLevel  int
-	ask          question
+	auto        bool
+	cancelLevel int
+	ask         question
+	// dialog is drawn over the screen and takes the keys while it is open.
+	dialog       *dialog
 	quitAfterRun bool
 	// stopping is the node whose cancel the footer is showing. When that
 	// node ends with the notice still up, the notice says how it ended.
@@ -167,9 +169,10 @@ func New(opts Options) Model {
 	g := newGraphPane(layout.FromWorkflow(opts.Workflow), rs.cells(time.Time{}))
 	f := newFooter(styles).withNotice(noticeInfo, opts.Notice)
 	ask := noQuestion
+	var dlg *dialog
 	if opts.Confirm != "" {
 		ask = question{kind: askStart, node: "", downstream: false}
-		f = f.withNotice(noticeWarn, opts.Confirm)
+		dlg = newQuestion("Start anyway?", opts.Confirm, "Start", "Quit", false, styles)
 	}
 	return Model{
 		opts:           opts,
@@ -188,6 +191,7 @@ func New(opts Options) Model {
 		auto:           true,
 		cancelLevel:    0,
 		ask:            ask,
+		dialog:         dlg,
 		quitAfterRun:   false,
 		stopping:       "",
 		stoppingNotice: "",
@@ -318,7 +322,7 @@ func (m Model) runFinished() Model {
 	switch m.ask.kind {
 	case askQuit:
 		// q quits outright now, so the question is moot.
-		m.ask = noQuestion
+		m.ask, m.dialog = noQuestion, nil
 		m.footer = m.footer.withNotice(noticeInfo, "")
 	case askNone:
 		m.footer = m.footer.withNotice(noticeInfo, "")
@@ -344,7 +348,7 @@ func (m Model) selectNode(id string) Model {
 func (m Model) interrupted(msg interruptedMsg) (Model, tea.Cmd) {
 	if m.ask.kind == askStart {
 		// A signal before the user answered: don't start at all.
-		m.ask = noQuestion
+		m.ask, m.dialog = noQuestion, nil
 		return m, tea.Quit
 	}
 	m.cancelLevel = max(m.cancelLevel, msg.level)
@@ -377,10 +381,10 @@ func (m Model) interrupt() tea.Cmd {
 }
 
 func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
-	if m.ask.kind != askNone {
+	if m.dialog != nil {
 		var cmd tea.Cmd
 		var handled bool
-		if m, cmd, handled = m.answer(k); handled {
+		if m, cmd, handled = m.dialogKey(k); handled {
 			return m, cmd
 		}
 	}
@@ -393,8 +397,12 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	if m.viewOpen {
-		if key.Matches(k, m.keys.Close) {
+		switch {
+		case key.Matches(k, m.keys.Close):
 			m.viewOpen = false
+			return m, nil
+		case key.Matches(k, m.keys.Help):
+			m.dialog = helpDialog(m.keys.logViewHelp(), m.keys.helpClose(), m.styles)
 			return m, nil
 		}
 		m.view, _ = m.view.Update(k, m.keys, m.rs.logs[m.view.node])
@@ -411,10 +419,17 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.ask = question{kind: askQuit, node: "", downstream: false}
-		m.footer = m.footer.withNotice(noticeWarn, "The run is still going. Press y to cancel it and quit, any other key to keep it running.")
+		m.dialog = newQuestion("Quit while the run is going?",
+			"Running nodes get SIGINT and their grace period, then weft quits once they stop. Nodes that have not started do not run.",
+			"Cancel run and quit", "Keep running", true, m.styles)
 		return m, nil
 	case key.Matches(k, m.keys.Help):
-		m.footer = m.footer.toggleHelp()
+		m.dialog = helpDialog(m.keys.graphHelp(), m.keys.helpClose(), m.styles)
+		return m, nil
+	case key.Matches(k, m.keys.Info):
+		if m.graph.selected != "" {
+			m.dialog = m.nodeInfo(m.graph.selected)
+		}
 		return m, nil
 	case key.Matches(k, m.keys.Open):
 		if m.graph.selected == "" {
@@ -438,12 +453,33 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// answer handles a key while a question waits. It reports whether the key
-// is used up; a ctrl+c that only dismisses a question still cancels.
-func (m Model) answer(k tea.KeyPressMsg) (Model, tea.Cmd, bool) {
+// dialogKey handles a key while a dialog is open. It reports whether the
+// key is used up. ctrl+c is never only a dialog key: it closes the dialog
+// and still cancels, except that before the start it quits without
+// starting.
+func (m Model) dialogKey(k tea.KeyPressMsg) (Model, tea.Cmd, bool) {
+	if key.Matches(k, m.keys.Cancel) {
+		if m.ask.kind == askStart {
+			return m.answer(false)
+		}
+		m, cmd, _ := m.answer(false)
+		return m, cmd, false
+	}
+	switch m.dialog.update(k, m.keys, m.width, m.height) {
+	case dialogYes:
+		return m.answer(true)
+	case dialogNo, dialogClosed:
+		return m.answer(false)
+	case dialogKept:
+	}
+	return m, nil, true
+}
+
+// answer closes the dialog and acts on the answer to its question, if it
+// has one.
+func (m Model) answer(yes bool) (Model, tea.Cmd, bool) {
 	ask := m.ask
-	m.ask = noQuestion
-	yes := key.Matches(k, m.keys.Confirm)
+	m.ask, m.dialog = noQuestion, nil
 	switch ask.kind {
 	case askStart:
 		if !yes {
@@ -458,7 +494,6 @@ func (m Model) answer(k tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			return nil
 		}, true
 	case askQuit:
-		m.footer = m.footer.withNotice(noticeInfo, "")
 		if yes {
 			m.quitAfterRun = true
 			return m, m.interrupt(), true
@@ -471,7 +506,7 @@ func (m Model) answer(k tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		m.footer = m.footer.withNotice(noticeInfo, "rerun of "+m.displayName(ask.node)+" skipped")
 	case askNone:
 	}
-	return m, nil, !key.Matches(k, m.keys.Cancel)
+	return m, nil, true
 }
 
 // requestRerun checks that id may rerun before asking for it, so an
@@ -502,7 +537,13 @@ func (m Model) rerunDone(msg rerunDoneMsg) Model {
 	name := m.displayName(msg.node)
 	if drift, ok := errors.AsType[*plan.DriftError](msg.err); ok {
 		m.ask = question{kind: askRerun, node: msg.node, downstream: msg.downstream}
-		m.footer = m.footer.withNotice(noticeWarn, "Since this run last started, "+strings.Join(drift.Reasons, " and ")+". y reruns "+name+" anyway, any other key skips it.")
+		what := name
+		if msg.downstream {
+			what += " and everything downstream of it"
+		}
+		m.dialog = newQuestion("Rerun anyway?",
+			"Since this run last started, "+strings.Join(drift.Reasons, " and ")+". Rerun "+what+" anyway?",
+			"Rerun", "Skip", false, m.styles)
 		return m
 	}
 	switch {
@@ -577,24 +618,22 @@ func (m Model) interactiveNode() string {
 }
 
 // footerHelp returns the help bindings for the current view.
-func (m Model) footerHelp() ([]key.Binding, [][]key.Binding) {
+func (m Model) footerHelp() []key.Binding {
 	if m.viewOpen {
-		return m.keys.logHelp(), nil
+		return m.keys.logHelp()
 	}
 	// ctrl+c before the start confirmation quits without starting, so it
 	// is not a cancel there.
 	running := !m.rs.done && m.ask.kind != askStart
-	return m.keys.mainHelp(running), m.keys.mainFullHelp()
+	return m.keys.mainHelp(running)
 }
 
 // resized recomputes every component's size from the terminal size.
 func (m Model) resized() Model {
 	w, h := m.width, m.height
 	m.header = m.header.withWidth(w)
-	// The full help gives way before the graph or the log would vanish.
-	m.footer = m.footer.withWidth(w).withMaxRows(h - mainChrome - 2)
-	short, full := m.footerHelp()
-	footerH := m.footer.height(short, full)
+	m.footer = m.footer.withWidth(w)
+	footerH := m.footer.height()
 
 	if m.viewOpen {
 		// title, body, rule, footer
@@ -629,9 +668,18 @@ func (m Model) render() string {
 		return ansi.Truncate(fmt.Sprintf("window too small · weft %s %s", m.rs.wf.Name, ph), m.width, "…")
 	}
 
+	screen := m.screen()
+	if m.dialog != nil {
+		return m.dialog.overlay(screen, m.width, m.height)
+	}
+	return screen
+}
+
+// screen renders the current view without any dialog.
+func (m Model) screen() string {
+	ph := runPhase(m.rs, m.cancelLevel)
 	rule := m.styles.Rule.Render(repeat("─", m.width))
-	short, full := m.footerHelp()
-	foot := m.footer.View(short, full, m.styles)
+	foot := m.footer.View(m.footerHelp(), m.styles)
 	if m.viewOpen {
 		return join(m.view.View(m.rs, m.styles, m.now), rule, foot)
 	}

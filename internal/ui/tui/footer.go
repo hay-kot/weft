@@ -16,22 +16,19 @@ const (
 	noticeWarn
 )
 
-// footer shows an optional notice row above the key help.
+// footer shows an optional notice row above the key help. The full key
+// list is the help dialog's job, so the footer has one help row.
 type footer struct {
 	help       help.Model
-	showAll    bool
 	notice     string
 	noticeKind noticeKind
 	width      int
-	// maxRows caps the help; the full help falls back to the short one
-	// when it does not fit.
-	maxRows int
 }
 
 func newFooter(s Styles) footer {
 	h := help.New()
 	h.Styles = s.Help
-	return footer{help: h, showAll: false, notice: "", noticeKind: noticeInfo, width: 0, maxRows: 0}
+	return footer{help: h, notice: "", noticeKind: noticeInfo, width: 0}
 }
 
 func (f footer) withWidth(w int) footer {
@@ -41,43 +38,21 @@ func (f footer) withWidth(w int) footer {
 	return f
 }
 
-func (f footer) withMaxRows(n int) footer {
-	f.maxRows = n
-	return f
-}
-
 func (f footer) withNotice(kind noticeKind, text string) footer {
 	f.notice, f.noticeKind = text, kind
 	return f
 }
 
-func (f footer) toggleHelp() footer {
-	f.showAll = !f.showAll
-	return f
-}
-
-// helpLines renders the key help for the given bindings.
-func (f footer) helpLines(short []key.Binding, full [][]key.Binding) []string {
-	if f.showAll && full != nil {
-		lines := strings.Split(f.help.FullHelpView(full), "\n")
-		if len(lines) < f.maxRows {
-			return lines
-		}
-	}
-	return []string{f.help.ShortHelpView(short)}
-}
-
 // height returns how many rows View draws.
-func (f footer) height(short []key.Binding, full [][]key.Binding) int {
-	n := len(f.helpLines(short, full))
+func (f footer) height() int {
 	if f.notice != "" {
-		n++
+		return 2
 	}
-	return n
+	return 1
 }
 
 // View draws the notice, if any, and the help.
-func (f footer) View(short []key.Binding, full [][]key.Binding, s Styles) string {
+func (f footer) View(short []key.Binding, s Styles) string {
 	var rows []string
 	if f.notice != "" {
 		style := s.Dim
@@ -86,8 +61,6 @@ func (f footer) View(short []key.Binding, full [][]key.Binding, s Styles) string
 		}
 		rows = append(rows, ansi.Truncate(" "+style.Render(f.notice), f.width, "…"))
 	}
-	for _, l := range f.helpLines(short, full) {
-		rows = append(rows, ansi.Truncate(" "+l, f.width, "…"))
-	}
+	rows = append(rows, ansi.Truncate(" "+f.help.ShortHelpView(short), f.width, "…"))
 	return strings.Join(rows, "\n")
 }

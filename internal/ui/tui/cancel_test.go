@@ -4,7 +4,6 @@ import (
 	"errors"
 	"testing"
 
-	"charm.land/bubbles/v2/key"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -109,17 +108,15 @@ func TestCancelNodeEngineError(t *testing.T) {
 func TestCancelKeysInHelp(t *testing.T) {
 	m := newCancelNodeModel(t, &fakeCancelNode{calls: nil, replies: nil, err: nil})
 	enabled := func(m Model) map[string]bool {
-		short, _ := m.footerHelp()
 		out := map[string]bool{}
-		for _, b := range short {
+		for _, b := range m.footerHelp() {
 			out[b.Help().Key] = b.Enabled()
 		}
 		return out
 	}
 	assert.True(t, enabled(m)["x"])
 	assert.True(t, enabled(m)["ctrl+c"])
-	_, full := m.footerHelp()
-	assert.Contains(t, helpKeys(full), "x")
+	assert.Contains(t, helpKeys(m.keys.graphHelp()), "x")
 
 	m = send(t, m, deployFailed())
 	assert.False(t, enabled(m)["x"], "nothing to cancel after the run")
@@ -131,11 +128,11 @@ func TestCancelKeysInHelp(t *testing.T) {
 	assert.False(t, enabled(ask)["x"])
 }
 
-func helpKeys(full [][]key.Binding) []string {
+func helpKeys(sections []helpSection) []string {
 	var out []string
-	for _, col := range full {
-		for _, b := range col {
-			out = append(out, b.Help().Key)
+	for _, sec := range sections {
+		for _, e := range sec.entries {
+			out = append(out, e.binding.Help().Key)
 		}
 	}
 	return out

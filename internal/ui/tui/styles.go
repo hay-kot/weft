@@ -24,6 +24,15 @@ type Styles struct {
 	Error    lipgloss.Style
 	Help     help.Styles
 
+	// Dialog boxes and their parts.
+	Dialog         lipgloss.Style
+	DialogDanger   lipgloss.Style
+	DialogTitle    lipgloss.Style
+	DialogSection  lipgloss.Style
+	DialogKey      lipgloss.Style
+	Button         lipgloss.Style
+	ButtonSelected lipgloss.Style
+
 	running   lipgloss.Style
 	waiting   lipgloss.Style
 	succeeded lipgloss.Style
@@ -55,13 +64,21 @@ func DefaultStyles() Styles {
 		Notice:     base.Foreground(lipgloss.Yellow),
 		Error:      base.Foreground(lipgloss.Red),
 		Help:       h,
-		running:    base.Foreground(lipgloss.Blue),
-		waiting:    base.Foreground(lipgloss.Magenta),
-		succeeded:  base.Foreground(lipgloss.Green),
-		skipped:    dim.Foreground(lipgloss.Green),
-		failed:     base.Foreground(lipgloss.Red),
-		stopped:    base.Foreground(lipgloss.Yellow),
-		idle:       dim,
+		// Reverse video marks the selected button without needing color.
+		Dialog:         base.Border(lipgloss.RoundedBorder()),
+		DialogDanger:   base.Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Red),
+		DialogTitle:    base.Bold(true),
+		DialogSection:  dim.Italic(true),
+		DialogKey:      base.Bold(true),
+		Button:         dim.Padding(0, 1),
+		ButtonSelected: base.Bold(true).Reverse(true).Padding(0, 1),
+		running:        base.Foreground(lipgloss.Blue),
+		waiting:        base.Foreground(lipgloss.Magenta),
+		succeeded:      base.Foreground(lipgloss.Green),
+		skipped:        dim.Foreground(lipgloss.Green),
+		failed:         base.Foreground(lipgloss.Red),
+		stopped:        base.Foreground(lipgloss.Yellow),
+		idle:           dim,
 	}
 }
 
