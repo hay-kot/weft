@@ -55,18 +55,6 @@ func TestRender(t *testing.T) {
 	assert.Equal(t, want, out.String())
 }
 
-func TestFormatDuration(t *testing.T) {
-	tests := map[time.Duration]string{
-		0:                       "0:00",
-		1500 * time.Millisecond: "0:02",
-		61 * time.Second:        "1:01",
-		time.Hour + 2*time.Minute + 3*time.Second: "1:02:03",
-	}
-	for d, want := range tests {
-		assert.Equal(t, want, plain.FormatDuration(d), d.String())
-	}
-}
-
 func TestRenderDropsAndBarrier(t *testing.T) {
 	wf, err := workflow.Parse([]byte("nodes:\n  a: {run: x}\n"))
 	require.NoError(t, err)

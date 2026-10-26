@@ -7,9 +7,9 @@ import (
 	"io"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/hay-kot/weft/internal/events"
+	"github.com/hay-kot/weft/internal/ui"
 	"github.com/hay-kot/weft/internal/workflow"
 )
 
@@ -98,7 +98,7 @@ func (r *Renderer) Render(e events.Event) {
 func (r *Renderer) state(e events.NodeChanged) {
 	dur := ""
 	if !e.Started.IsZero() && !e.Finished.IsZero() && e.Reason != "start_error" {
-		dur = " in " + FormatDuration(e.Finished.Sub(e.Started))
+		dur = " in " + ui.FormatDuration(e.Finished.Sub(e.Started))
 	}
 	attempt := ""
 	if e.Attempt > 1 {
@@ -147,16 +147,4 @@ func lastSegment(line string) string {
 		return after
 	}
 	return line
-}
-
-// FormatDuration renders d as m:ss, or h:mm:ss past an hour.
-func FormatDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := int(d / time.Hour)
-	m := int(d % time.Hour / time.Minute)
-	s := int(d % time.Minute / time.Second)
-	if h > 0 {
-		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
-	}
-	return fmt.Sprintf("%d:%02d", m, s)
 }

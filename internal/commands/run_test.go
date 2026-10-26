@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAsyncWriterNeverBlocks(t *testing.T) {
@@ -87,4 +88,38 @@ func TestWaitForOutput(t *testing.T) {
 		close(abort)
 		assert.False(t, waitForOutput(never, func() int64 { return 0 }, time.Hour, abort))
 	})
+}
+
+func TestPickUI(t *testing.T) {
+	env := func(vars map[string]string) func(string) string {
+		return func(k string) string { return vars[k] }
+	}
+	tests := []struct {
+		name          string
+		flag          string
+		stdin, stdout bool
+		vars          map[string]string
+		want          string
+		wantErr       bool
+	}{
+		{"auto in a terminal", uiAuto, true, true, nil, uiTUI, false},
+		{"auto with stdout piped", uiAuto, true, false, nil, uiPlain, false},
+		{"auto with stdin redirected", uiAuto, false, true, nil, uiPlain, false},
+		{"auto in CI", uiAuto, true, true, map[string]string{"CI": "true"}, uiPlain, false},
+		{"auto on a dumb terminal", uiAuto, true, true, map[string]string{"TERM": "dumb"}, uiPlain, false},
+		{"plain in a terminal", uiPlain, true, true, nil, uiPlain, false},
+		{"tui in CI with a terminal", uiTUI, true, true, map[string]string{"CI": "true"}, uiTUI, false},
+		{"tui without a terminal", uiTUI, true, false, nil, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := pickUI(tt.flag, tt.stdin, tt.stdout, env(tt.vars))
+			if tt.wantErr {
+				assert.ErrorContains(t, err, "--ui=tui needs a terminal")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

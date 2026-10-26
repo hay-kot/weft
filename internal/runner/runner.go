@@ -111,11 +111,11 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 	cmd := exec.Command(spec.Shell[0], args...) //nolint:gosec,noctx // running the workflow's command is the point
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	foreground := false
 	var output *outputPipe
 	if spec.Interactive {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if term.IsTerminal(os.Stdin) {
 			foreground = true
@@ -123,6 +123,11 @@ func (Process) Run(ctx context.Context, spec Spec) Result {
 			cmd.SysProcAttr.Ctty = int(os.Stdin.Fd())
 		}
 	} else {
+		// A new session has no controlling terminal, so a node that opens
+		// /dev/tty (a password prompt, a curses pager) gets an error instead
+		// of drawing over the TUI or stopping on SIGTTIN in the background.
+		// The session leader's process group ID is its PID, as with Setpgid.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		var err error
 		output, err = newOutputPipe(spec.Output)
 		if err != nil {

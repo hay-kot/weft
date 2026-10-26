@@ -79,17 +79,67 @@ Every node also gets `WEFT_WORKFLOW`, `WEFT_ROOT`, `WEFT_RUN_ID`,
 - An interactive node waits until nothing else is running, and nothing else
   starts while it runs. Its output goes straight to your terminal and is not
   captured. It needs a terminal on stdin; without one it fails with a clear
-  error.
+  error. Other nodes run without a controlling terminal, so a command that
+  tries to prompt on `/dev/tty` (`sudo`, an SSH passphrase) fails instead of
+  hanging or drawing over the screen. Mark such a node `interactive`.
 - Ctrl-C cancels the run. Running nodes get SIGINT, their `kill_timeout`, then
   SIGTERM and 5s more, then SIGKILL. Each node runs in its own process group,
   so `mise` and whatever it started get the signal together. A second Ctrl-C
   sends SIGKILL at once. Ctrl-C while an interactive node runs goes to that
-  node, and weft then cancels the rest of the run.
+  node, and weft then cancels the rest of the run. SIGTERM and SIGHUP cancel
+  the same way as Ctrl-C.
 - Output to a pipe never slows the run down. If stdout is a pager you
   paused, or a reader that stopped, weft keeps scheduling and canceling on
   time and skips lines the reader can't take (it says how many). The node
   logs on disk always have everything. weft also keeps going when stdout
   closes early, as with `weft run deploy | head`.
+
+## The run view
+
+When stdin and stdout are terminals and `CI` is unset, `weft run` shows the
+graph live, with the selected node's output under it:
+
+```text
+ deploy  running  1:33  4/7 done                                   run 20261025T191200-a3f9
+ run dir /src/app/.weft/runs/deploy/20261025T191200-a3f9
+───────────────────────────────────────────────────────────────────────────────────────────
+               ┌─▸ ✓ go-check  0:02 ─┐
+ ✓ guard 0:00 ─┼─▸ ✓ ui-check  0:02 ─┼─▸ ⠹ release 1:31 ───▸ ○ deploy ───▸ ○ tofu-apply
+               └─▸ ✓ db-backup 0:01 ─┘
+───────────────────────────────────────────────────────────────────────────────────────────
+ › release  ● running  1:31  mise run release
+ • building binaries  layout=dist
+───────────────────────────────────────────────────────────────────────────────────────────
+ hjkl select • enter log • ctrl+c cancel • q quit • ? help • f follow • v layout
+```
+
+Icons: `○` pending, a spinner for running, `◆` waiting for the terminal,
+`✓` succeeded, `✗` failed, `⊘` blocked or canceled.
+
+The selection follows the run (the node that just started, or the first
+failure) until you move it. Keys:
+
+| Key | Action |
+| --- | --- |
+| `h` `j` `k` `l`, arrows | Move the selection on screen |
+| `enter` | Full-screen log of the selected node (`esc` or `q` goes back) |
+| `pgup` `pgdn`, `ctrl+u` `ctrl+d` | Scroll the log; `g` and `G` jump to the top and bottom |
+| `f` | Pause or resume following the log's newest lines |
+| `v` | Switch between the horizontal and vertical graph |
+| `ctrl+c` | Cancel the run; again to kill the running nodes |
+| `q` | Quit. During a run it asks first, and `y` cancels the run and quits once the nodes stop |
+| `?` | Show every key |
+
+In the full-screen log, `j` `k` scroll by a line and `h` `l` scroll
+sideways through long lines. The TUI keeps the last 10,000 lines of each
+node; the node log on disk has all of them, and its path is in the
+full-screen log's title.
+
+When an interactive node runs, the TUI steps aside and the node gets the
+terminal. The TUI comes back when the node exits. When the run ends, the
+TUI stays open until you press `q` (or quits at once with `--exit-on-end`),
+and weft exits with the run's status either way. weft's own log never goes
+to the screen in the TUI; it is in the run's `weft.log`.
 
 ## Commands
 
@@ -120,7 +170,8 @@ file is the source of truth.
 
 | Flag | Meaning |
 | --- | --- |
-| `--ui=auto\|plain` | Output mode. `plain` prints prefixed lines |
+| `--ui=auto\|tui\|plain` | Output mode. `auto` picks `tui` when stdin and stdout are terminals, `CI` is unset, and `TERM` is not `dumb`; `plain` prints prefixed lines |
+| `--exit-on-end` | Quit the TUI as soon as the run ends |
 | `--concurrency`, `-j` | Override the workflow's `concurrency` |
 
 Global flags: `--log-level` (or `WEFT_LOG_LEVEL`), `--no-color` (or
@@ -129,8 +180,9 @@ Global flags: `--log-level` (or `WEFT_LOG_LEVEL`), `--no-color` (or
 ## Run directories and logs
 
 Each run gets a sortable ID such as `20261025T191200-a3f9` and a directory
-at `.weft/runs/<workflow>/<run-id>/`. weft prints both when the run starts
-and when it ends. The newest 20 runs per workflow are kept. On first use weft
+at `.weft/runs/<workflow>/<run-id>/`. The TUI shows both in its header, and
+weft prints them to stderr when the run ends (and when it starts, in plain
+mode). The newest 20 runs per workflow are kept. On first use weft
 writes `.weft/.gitignore` so runs stay out of git.
 
 ```text

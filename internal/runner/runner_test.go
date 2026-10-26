@@ -3,6 +3,7 @@ package runner_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/hay-kot/weft/internal/runner"
 )
@@ -280,4 +282,32 @@ func TestCanceledBeforeStartRunsNothing(t *testing.T) {
 	res := runner.Process{}.Run(ctx, spec(t, "touch "+marker, newBuf()))
 	assert.Equal(t, runner.ReasonCanceled, res.Reason)
 	assert.NoFileExists(t, marker)
+}
+
+// TestHelperSession is not a test. It prints its PID and session ID for
+// TestNodeRunsInItsOwnSession.
+func TestHelperSession(t *testing.T) {
+	if os.Getenv("WEFT_HELPER_SESSION") == "" {
+		t.Skip("helper process")
+	}
+	sid, err := unix.Getsid(0)
+	if err != nil {
+		os.Exit(2)
+	}
+	_, _ = os.Stdout.WriteString("pid=" + strconv.Itoa(os.Getpid()) + " sid=" + strconv.Itoa(sid) + "\n")
+	os.Exit(0)
+}
+
+func TestNodeRunsInItsOwnSession(t *testing.T) {
+	out := newBuf()
+	s := spec(t, "-test.count=1", out)
+	s.Shell = []string{os.Args[0], "-test.run=^TestHelperSession$", "-test.v=false"}
+	s.Env = append(s.Env, "WEFT_HELPER_SESSION=1")
+	res := runner.Process{}.Run(t.Context(), s)
+	require.True(t, res.Success(), "output: %s", out.String())
+
+	var pid, sid int
+	_, err := fmt.Sscanf(strings.TrimSpace(out.String()), "pid=%d sid=%d", &pid, &sid)
+	require.NoError(t, err, "output: %s", out.String())
+	assert.Equal(t, pid, sid, "a non-interactive node must lead its own session, with no controlling terminal")
 }
