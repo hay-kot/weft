@@ -1,0 +1,30 @@
+# Stub copy of recipinned's release-and-deploy. Same shape, no real effects.
+# Every command is a script in bin/; none touches git, a registry, or infra.
+#
+# Knobs (comma-separated node IDs):
+#   WEFT_FIXTURE_FAIL  nodes that exit 1
+#   WEFT_FIXTURE_HANG  nodes that keep running until canceled
+concurrency: 4
+nodes:
+  guard:
+    run: bin/stub.sh guard 0.2 "on branch main (stub)"
+  go-check:
+    needs: [guard]
+    run: bin/stub.sh go-check 2 "go vet ./..." "golangci-lint run" "go test ./..."
+  ui-check:
+    needs: [guard]
+    run: bin/stub.sh ui-check 1.5 "pnpm lint" "pnpm test"
+  db-backup:
+    needs: [guard]
+    kill_timeout: 10s
+    run: bin/trap-int.sh db-backup 1
+  release:
+    needs: [go-check, ui-check, db-backup]
+    run: bin/release.sh
+  deploy:
+    needs: [release]
+    run: bin/deploy.sh
+  tofu-apply:
+    needs: [deploy]
+    interactive: true
+    run: bin/approve.sh

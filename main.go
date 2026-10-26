@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -84,6 +85,8 @@ func main() {
 }
 
 func run() int {
+	zerolog.TimeFieldFormat = time.RFC3339Nano
+	zerolog.DurationFieldUnit = time.Millisecond
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 
 	flags := &commands.Flags{}
@@ -97,7 +100,7 @@ func run() int {
 			&cli.StringFlag{
 				Name:        "log-level",
 				Usage:       "log level (debug, info, warn, error, fatal, panic)",
-				Sources:     cli.EnvVars("LOG_LEVEL"),
+				Sources:     cli.EnvVars("WEFT_LOG_LEVEL", "LOG_LEVEL"),
 				Value:       "info",
 				Destination: &flags.LogLevel,
 			},
