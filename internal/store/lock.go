@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +63,24 @@ func (r *Run) Lock() (*Lock, error) {
 	return &Lock{f: f}, nil
 }
 
+// InUse reports whether another weft process holds the run's lock, and
+// that process's ID when known. It probes with a shared lock for an
+// instant, so a weft that tries to take the run at that same instant is
+// refused as if the run were in use; status readers accept that.
+func (r *Run) InUse() (pid int, inUse bool) {
+	path := filepath.Join(r.Dir, LockFile)
+	f, err := os.Open(path) //nolint:gosec // path is inside a run directory
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = f.Close() }()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		return readPID(path), errors.Is(err, syscall.EWOULDBLOCK)
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return 0, false
+}
+
 // Release gives the lock up. It is safe to call on a nil Lock.
 func (l *Lock) Release() {
 	if l == nil || l.f == nil {
@@ -114,6 +133,21 @@ func Latest(root, workflowName string) (*Run, error) {
 		return nil, fmt.Errorf("%s: %w", workflowName, ErrNoRuns)
 	}
 	return Open(root, workflowName, ids[len(ids)-1])
+}
+
+// List returns the runs of a workflow, newest first. It returns an empty
+// list, not an error, when the workflow has never run.
+func List(root, workflowName string) ([]*Run, error) {
+	dir := WorkflowRunsDir(root, workflowName)
+	ids, err := runIDs(dir)
+	if err != nil {
+		return nil, err
+	}
+	runs := make([]*Run, 0, len(ids))
+	for _, id := range slices.Backward(ids) {
+		runs = append(runs, &Run{ID: id, Dir: filepath.Join(dir, id), Workflow: workflowName})
+	}
+	return runs, nil
 }
 
 // runIDs returns the run IDs under dir, oldest first.

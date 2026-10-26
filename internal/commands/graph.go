@@ -45,8 +45,13 @@ func (cmd *GraphCmd) Register(app *cli.Command) *cli.Command {
 same layout the TUI shows during a run. Levels run left to right; when that
 is wider than the terminal, they run top to bottom instead.
 
-With --json, prints the nodes with their levels and needs, plus the drawn
-lines.`,
+With --json, prints one object: workflow, orientation, levels (node IDs per
+level), nodes (id, label, level, needs), and lines (the drawing).
+
+Examples:
+  weft graph deploy
+  weft graph deploy --layout vertical
+  weft graph deploy --json | jq '.nodes[] | {id, needs}'`,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "layout",

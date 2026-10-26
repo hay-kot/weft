@@ -627,6 +627,27 @@ scenario_plain_resume() {
 
 # --only leaves the interactive node out, so a run without a terminal
 # still succeeds, and --resume with nothing left exits 0 with a notice.
+# What an agent reads after a failed run: status names the failed node,
+# shows its log tail and the commands to run next, and logs prints it whole.
+scenario_plain_status() {
+  local run id status=0
+  run=$(fail_deploy_plain)
+  id=$(basename "$run")
+  expect first "see 'weft status $fixture'"
+  "$bin" status "$fixture" >"$out/$scenario.status.txt" 2>&1 || status=$?
+  expect_status "$status" 0
+  expect status "deploy run $id: failed"
+  expect status "deploy: failing on request (WEFT_FIXTURE_FAIL)"
+  expect status "weft run $fixture --resume"
+  "$bin" status "$fixture" --json >"$out/$scenario.json.txt" 2>&1 || fail "weft status --json failed"
+  expect json '"status":"failed"'
+  expect json '"log_tail":["deploy: rolling out'
+  "$bin" logs "$fixture" deploy >"$out/$scenario.logs.txt" 2>&1 || fail "weft logs failed"
+  expect logs "deploy: failing on request (WEFT_FIXTURE_FAIL)"
+  "$bin" runs "$fixture" --json --limit 1 >"$out/$scenario.runs.txt" 2>&1 || fail "weft runs --json failed"
+  expect runs "\"run_id\":\"$id\""
+}
+
 scenario_plain_only() {
   local status=0
   "$bin" run --ui=plain --only guard,go-check,ui-check,db-backup,release,deploy "$fixture" </dev/null >"$out/$scenario.final.txt" 2>&1 || status=$?
@@ -703,7 +724,7 @@ scenario_tui_no_tty() {
 
 all=(plain_success plain_fail plain_cancel plain_kill plain_interactive_cancel plain_no_tty plain_stalled_output plain_closed_stdout graph_wide graph_narrow graph_forced_horizontal
   tui_success tui_narrow_fail tui_resize tui_cancel tui_kill tui_quit_confirm tui_exit_on_end
-  tui_interactive_cancel tui_flood tui_no_tty plain_resume plain_only tui_resume tui_rerun tui_node_cancel)
+  tui_interactive_cancel tui_flood tui_no_tty plain_resume plain_only plain_status tui_resume tui_rerun tui_node_cancel)
 
 log "building weft into $out"
 (cd "$repo" && go build -o "$bin" .)

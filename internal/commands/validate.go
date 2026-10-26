@@ -32,7 +32,14 @@ func (cmd *ValidateCmd) Register(app *cli.Command) *cli.Command {
 		ArgsUsage: "[workflow]",
 		Description: `Parses a workflow and checks node IDs, fields, needs, and cycles. With no
 argument, checks every workflow in the nearest .weft/ directory. Exits
-non-zero when any workflow is invalid.`,
+non-zero when any workflow is invalid.
+
+With --json, prints an array with one object per workflow: workflow, path,
+valid, nodes (the node count), and problems (one message per problem).
+
+Examples:
+  weft validate
+  weft validate deploy --json`,
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:        "json",

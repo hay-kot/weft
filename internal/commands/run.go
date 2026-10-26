@@ -94,7 +94,16 @@ When the workflow file or git HEAD changed since the run being continued
 last started, weft asks first in the TUI and refuses in plain mode unless
 --force is set: resuming a release after HEAD moved is how the wrong commit
 ships. In the TUI, r reruns the selected node and R reruns it with
-everything downstream, during the run or after it ends.`,
+everything downstream, during the run or after it ends.
+
+When the run fails, weft exits 1; weft status shows what failed and what to
+run next.
+
+Examples:
+  weft run deploy
+  weft run deploy --ui=plain --resume
+  weft run deploy --only guard,go-check,release
+  weft run deploy --from deploy`,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "ui",
@@ -263,7 +272,7 @@ func (cmd *RunCmd) run(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("the TUI failed: %w; run %s %s (%s), logs in %s", uiErr, run.ID, outcome, counts, run.Dir)
 	}
 	if !summary.Success {
-		return fmt.Errorf("run %s failed (%s); logs in %s", run.ID, counts, run.Dir)
+		return fmt.Errorf("run %s failed (%s); see 'weft status %s' for what failed, or logs in %s", run.ID, counts, c.Args().First(), run.Dir)
 	}
 	return nil
 }

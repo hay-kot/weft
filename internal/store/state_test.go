@@ -207,3 +207,42 @@ func TestWriteEventsContinuesSeq(t *testing.T) {
 	assert.Contains(t, string(data), `"seq":4`)
 	assert.NotContains(t, string(data), `"seq":5`)
 }
+
+func TestListNewestFirst(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	runs, err := store.List(root, "deploy")
+	require.NoError(t, err)
+	assert.Empty(t, runs)
+
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	older := mustCreate(t, root, now)
+	newer := mustCreate(t, root, now.Add(time.Minute))
+	runs, err = store.List(root, "deploy")
+	require.NoError(t, err)
+	require.Len(t, runs, 2)
+	assert.Equal(t, []string{newer.ID, older.ID}, []string{runs[0].ID, runs[1].ID})
+	assert.Equal(t, newer.Dir, runs[0].Dir)
+}
+
+func TestInUse(t *testing.T) {
+	t.Parallel()
+
+	run := mustCreate(t, t.TempDir(), time.Now())
+	_, inUse := run.InUse()
+	assert.False(t, inUse, "a run that was never locked")
+
+	lock, err := run.Lock()
+	require.NoError(t, err)
+	pid, inUse := run.InUse()
+	assert.True(t, inUse)
+	assert.Equal(t, os.Getpid(), pid)
+
+	lock.Release()
+	_, inUse = run.InUse()
+	assert.False(t, inUse, "a released lock")
+	relock, err := run.Lock()
+	require.NoError(t, err, "probing must not leave the run locked")
+	relock.Release()
+}

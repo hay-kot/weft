@@ -14,6 +14,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/hay-kot/weft/internal/commands"
+	"github.com/hay-kot/weft/internal/term"
 )
 
 var (
@@ -53,8 +54,21 @@ func setupLogger(level string, noColor bool) error {
 	if err != nil {
 		return fmt.Errorf("--log-level: %w", err)
 	}
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: noColor}).Level(parsedLevel)
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: noColor || !term.IsTerminal(os.Stderr)}).Level(parsedLevel)
 	return nil
+}
+
+// unknownCommand runs when no subcommand matched. Without it, urfave/cli
+// answers a typo with "No help topic" and exit status 3.
+func unknownCommand(_ context.Context, c *cli.Command) error {
+	if c.NArg() == 0 {
+		return cli.ShowRootCommandHelp(c)
+	}
+	name := c.Args().First()
+	if s := cli.SuggestCommand(c.Commands, name); s != "" {
+		return fmt.Errorf("unknown command %q; did you mean %q? Run 'weft --help' for the commands", name, s)
+	}
+	return fmt.Errorf("unknown command %q; run 'weft --help' for the commands", name)
 }
 
 func main() {
@@ -91,8 +105,14 @@ Node fields: run (required), needs, label, dir, env, shell, interactive,
 timeout, kill_timeout, continue_on_error. Top-level fields: concurrency,
 shell, nodes. weft validate checks a file; weft run runs it.
 
+After a run, weft status shows how it went, weft logs prints a node's
+output, and weft runs lists earlier runs. Agents and scripts: weft doc
+prints a compact reference, and status, runs, validate, and graph take
+--json.
+
 Run "weft <command> --help" for each command, and see the README for every
 field.`,
+		Suggest:               true,
 		Version:               build(),
 		EnableShellCompletion: true,
 		Flags: []cli.Flag{
@@ -113,10 +133,15 @@ field.`,
 		Before: func(ctx context.Context, c *cli.Command) (context.Context, error) {
 			return ctx, setupLogger(flags.LogLevel, flags.NoColor)
 		},
+		Action: unknownCommand,
 	}
 	app = commands.NewRunCmd(flags).Register(app)
 	app = commands.NewValidateCmd(flags).Register(app)
 	app = commands.NewGraphCmd(flags).Register(app)
+	app = commands.NewRunsCmd(flags).Register(app)
+	app = commands.NewStatusCmd(flags).Register(app)
+	app = commands.NewLogsCmd(flags).Register(app)
+	app = commands.NewDocCmd(flags).Register(app)
 	// +scaffold:command:register
 
 	// Without a handler, Go exits on SIGPIPE when stdout or stderr is a
@@ -132,7 +157,8 @@ field.`,
 		colorRed := "\033[38;2;215;95;107m"
 		colorGray := "\033[38;2;163;163;163m"
 		colorReset := "\033[0m"
-		if flags.NoColor {
+		// An agent or a log file reads stderr as text; escape codes are noise.
+		if flags.NoColor || !term.IsTerminal(os.Stderr) {
 			colorRed = ""
 			colorGray = ""
 			colorReset = ""

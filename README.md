@@ -156,9 +156,13 @@ to the screen in the TUI; it is in the run's `weft.log`.
 ## Commands
 
 ```text
-weft run <workflow>        run a workflow
-weft validate [workflow]   check one workflow, or every file in .weft/
-weft graph <workflow>      print the workflow's graph
+weft run <workflow>          run a workflow
+weft validate [workflow]     check one workflow, or every file in .weft/
+weft graph <workflow>        print the workflow's graph
+weft runs <workflow>         list its runs, newest first
+weft status <workflow>       how the latest run went, node by node
+weft logs <workflow> <node>  a node's output from the latest run
+weft doc                     a compact reference for agents and scripts
 ```
 
 `<workflow>` is a name (`deploy`) or a path to a workflow file.
@@ -189,6 +193,51 @@ file is the source of truth.
 | `--from <node>` | Run that node and everything downstream of it |
 | `--only <a,b>` | Run only those nodes (comma-separated, or repeat the flag) |
 | `--force` | With `--resume`, `--from`, or `--only`: go ahead even if the workflow file or git HEAD changed |
+
+### Looking at a run
+
+`weft status` reads a run directory and shows the run's status, each
+node's state, attempt, duration, and error, and the last 20 lines of the log
+of every node that did not succeed (`--tail` changes that). It ends with the
+commands to run next. It works during a run, from another terminal:
+
+```text
+$ weft status deploy
+deploy run 20261025T191200.482-a3f9: failed
+started 2026-10-25 19:12:00, updated 2026-10-25 19:15:33
+run dir /src/app/.weft/runs/deploy/20261025T191200.482-a3f9
+progress: 5 succeeded · 1 failed · 1 blocked
+
+guard       succeeded  0:00
+...
+deploy      failed     0:41  exit code 1
+tofu-apply  blocked    blocked: deploy failed
+
+deploy, attempt 1: failed
+log /src/app/.weft/runs/deploy/20261025T191200.482-a3f9/nodes/deploy/1.log
+  error: image tag v1.4.2 not found
+
+next:
+  weft logs deploy deploy --run 20261025T191200.482-a3f9    # full output of deploy
+  weft run deploy --resume    # rerun what did not succeed; skip the rest
+```
+
+`weft runs` lists earlier runs with their status, and `weft logs <workflow>
+<node>` prints a node's output (`--attempt`, `--tail`). `status` and `logs`
+read the latest run unless `--run <run-id>` names another. A run is
+`running` while a weft holds it, and `interrupted` when weft died before its
+nodes finished; `--resume` carries that on.
+
+### Agents and scripts
+
+`weft doc` prints a Markdown reference for driving weft without a
+terminal: safe defaults, every command, how to read a failed run, the JSON
+shapes, states, reasons, and exit codes. It ships in the binary, so it
+matches the weft installed. `weft status --json` prints one object with
+every node and its log tail, `weft runs --json` prints JSON Lines, and
+`validate` and `graph` take `--json` too. Errors go to stderr without color
+codes unless stderr is a terminal, and name the command to run next where
+there is one.
 
 ### Resuming a run
 
@@ -231,7 +280,7 @@ Only one weft at a time can use a run directory. A second `--resume` while
 the first is still going fails with the other weft's PID.
 
 Global flags: `--log-level` (or `WEFT_LOG_LEVEL`) and `--no-color` (or
-`NO_COLOR`). `weft validate --json` and `weft graph --json` print JSON.
+`NO_COLOR`). `--no-color` also turns color off for nodes.
 
 ## Run directories and logs
 
