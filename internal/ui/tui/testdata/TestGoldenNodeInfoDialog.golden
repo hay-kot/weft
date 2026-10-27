@@ -1,0 +1,45 @@
+ deploy  failed  0:04  5 succeeded, 1 failed, 1 blocked                                    run 20261025T191200.000-a3f9
+ run dir /repo/.weft/runs/deploy/20261025T191200.000-a3f9
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+               ┌─▸ ✓ go-check  0:02 ─┐
+ ✓ guard 0:00 ─┼─▸ ✓ ui-check  0:02 ─┼─▸ ✓ release 0:01 ───▸ ✗ deploy 0:01 ───▸ ⊘ tofu-apply
+               └─▸ ✓ db-backup 0:01 ─┘
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ › deploy  ✗ failed: exit╭────────────────────────────────────────────────────────────────────╮
+ deploy: rolling out v0.0│                                                                    │
+ deploy: failing on reque│  deploy                                                            │
+                         │  ────────────────────────────────────────────────────────────────  │
+                         │  Node                                                              │
+                         │  ────────────────────────────────────────────────────────────────  │
+                         │  state             failed                                          │
+                         │  needs             release                                         │
+                         │  needed by         tofu-apply                                      │
+                         │                                                                    │
+                         │  Command                                                           │
+                         │  ────────────────────────────────────────────────────────────────  │
+                         │  run               x                                               │
+                         │  dir               . (from the workflow root)                      │
+                         │  shell             bash -eo pipefail -c                            │
+                         │  kill_timeout      30s                                             │
+                         │                                                                    │
+                         │  Latest attempt                                                    │
+                         │  ────────────────────────────────────────────────────────────────  │
+                         │  started           19:12:03                                        │
+                         │  duration          0:01                                            │
+                         │  exit code         1                                               │
+                         │  reason            exit                                            │
+                         │  error             exit code 1                                     │
+                         │  log               /repo/.weft/runs/deploy/20261025T191200.000-    │
+                         │                    a3f9/nodes/deploy/1.log                         │
+                         │                                                                    │
+                         │  esc/i close                                                       │
+                         │                                                                    │
+                         ╰────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ hjkl select • enter log • q quit • ? help • r rerun • R rerun+downstream • i info • f follow • v layout

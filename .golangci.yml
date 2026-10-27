@@ -102,6 +102,11 @@ linters:
   exclusions:
     generated: lax
     warn-unused: true
+    rules:
+      # Tests read and write files and run processes they set up themselves.
+      - path: _test\.go
+        linters:
+          - gosec
 issues:
   fix: false
 formatters:

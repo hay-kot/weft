@@ -2,7 +2,6 @@ name: Build and Publish
 
 permissions:
   contents: write # for release
-  packages: write
 
 on:
   workflow_dispatch:
@@ -32,6 +31,9 @@ jobs:
 
       - uses: actions-ecosystem/action-get-latest-tag@v1
         id: get-latest-tag
+        with:
+          # The first release has no tag to bump from.
+          initial_version: v0.0.0
 
       - uses: actions-ecosystem/action-bump-semver@v1
         id: bump-semver
@@ -59,11 +61,6 @@ jobs:
         with:
           go-version-file: "go.mod"
           cache: true
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser

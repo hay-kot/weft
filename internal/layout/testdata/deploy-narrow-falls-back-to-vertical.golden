@@ -1,0 +1,17 @@
+           guard
+             │
+   ┌─────────┼──────────┐
+   ▾         ▾          ▾
+go-check  ui-check  db-backup
+   │         │          │
+   └─────────┼──────────┘
+             ▾
+          release
+             │
+             │
+             ▾
+           deploy
+             │
+             │
+             ▾
+         tofu-apply

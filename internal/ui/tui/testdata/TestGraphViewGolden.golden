@@ -1,0 +1,3 @@
+              ┌─▸ ✓ go-check  0:20 ─┐
+✓ guard 0:20 ─┼─▸ ✓ ui-check  0:20 ─┼─▸ ⠋ release 1:31 ───▸ ○ deploy ───▸ ○ tofu-apply
+              └─▸ ✓ db-backup 0:20 ─┘
