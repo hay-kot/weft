@@ -49,7 +49,7 @@ func deployFailedState(run *store.Run) *store.State {
 	}
 	s.Nodes["release"] = store.NodeState{
 		State: events.Succeeded, Attempt: 1, ExitCode: 0, Reason: "exit", Error: "",
-		Started: time.Unix(100, 0), Finished: time.Unix(160, 0), Log: "nodes/release/1.log", PGID: 0,
+		Started: time.Unix(100, 0), Finished: time.Unix(160, 0), Log: "release.1.log", PGID: 0,
 	}
 	s.Nodes["deploy"] = nodeState(events.Failed, 1)
 	s.Nodes["tofu-apply"] = nodeState(events.Blocked, 1)
@@ -92,11 +92,11 @@ func TestResumeRunsOnlyWhatDidNotSucceed(t *testing.T) {
 	st, err := h.run.LoadState()
 	require.NoError(t, err)
 	assert.Equal(t, events.Skipped, st.Nodes["release"].State)
-	assert.Equal(t, "nodes/release/1.log", st.Nodes["release"].Log)
+	assert.Equal(t, "release.1.log", st.Nodes["release"].Log)
 	deploy := st.Nodes["deploy"]
 	assert.Equal(t, events.Succeeded, deploy.State)
 	assert.Equal(t, 2, deploy.Attempt)
-	assert.Equal(t, "nodes/deploy/2.log", deploy.Log)
+	assert.Equal(t, "deploy.2.log", deploy.Log)
 	assert.Zero(t, deploy.PGID, "a finished node has no process group")
 	assert.Len(t, st.History, 1)
 	assert.FileExists(t, h.run.AttemptRecordPath("deploy", 2))

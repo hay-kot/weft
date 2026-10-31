@@ -30,7 +30,7 @@
                          │  reason            exit                                            │
                          │  error             exit code 1                                     │
                          │  log               /repo/.weft/runs/deploy/20261025T191200.000-    │
-                         │                    a3f9/nodes/deploy/1.log                         │
+                         │                    a3f9/deploy.1.log                               │
                          │                                                                    │
                          │  esc/i close                                                       │
                          │                                                                    │

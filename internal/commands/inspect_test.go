@@ -70,11 +70,11 @@ func project(t *testing.T) *store.Run {
 	st := store.NewState(run, filepath.Join(root, ".weft", "deploy.yml"), time.Now())
 	st.Nodes["release"] = store.NodeState{
 		State: events.Succeeded, Attempt: 1, ExitCode: 0, Reason: events.ReasonExit, Error: "",
-		Started: time.Now(), Finished: time.Now(), Log: "nodes/release/1.log", PGID: 0,
+		Started: time.Now(), Finished: time.Now(), Log: "release.1.log", PGID: 0,
 	}
 	st.Nodes[deployName] = store.NodeState{
 		State: events.Failed, Attempt: 2, ExitCode: 1, Reason: events.ReasonExit, Error: "exit code 1",
-		Started: time.Now(), Finished: time.Now(), Log: "nodes/deploy/2.log", PGID: 0,
+		Started: time.Now(), Finished: time.Now(), Log: "deploy.2.log", PGID: 0,
 	}
 	require.NoError(t, run.WriteState(st))
 	for _, a := range []struct {

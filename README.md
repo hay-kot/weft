@@ -235,7 +235,7 @@ deploy      failed     0:41  exit code 1
 tofu-apply  blocked    blocked: deploy failed
 
 deploy, attempt 1: failed
-log /src/app/.weft/runs/deploy/20261025T191200.482-a3f9/nodes/deploy/1.log
+log /src/app/.weft/runs/deploy/20261025T191200.482-a3f9/deploy.1.log
   error: image tag v1.4.2 not found
 
 next:
@@ -326,8 +326,8 @@ out of git.
   state.json               node states, attempts, and logs; history of starts
   lock                     held by the weft using the run
   events.jsonl             every state change, in order, with timestamps
-  nodes/<node>/<n>.log     output of attempt n (stdout and stderr together)
-  nodes/<node>/<n>.json    attempt n: command, dir, times, exit code, signal, reason
+  <node>.<n>.log           output of attempt n (stdout and stderr together)
+  <node>.<n>.json          attempt n: command, dir, times, exit code, signal, reason
 ```
 
 A resume appends to the same `weft.log` and `events.jsonl`. `state.json`

@@ -185,7 +185,7 @@ scenario_plain_success() {
   expect final "weft: run dir "
   local run
   run=$(latest_run)
-  for f in weft.log events.jsonl nodes/release/1.log nodes/release/1.json; do
+  for f in weft.log events.jsonl release.1.log release.1.json; do
     [ -f "$run/$f" ] || fail "run dir lacks $f"
   done
 }
@@ -262,10 +262,10 @@ scenario_plain_stalled_output() {
   local run="" i
   for ((i = 0; i < 300; i++)); do
     run=$(latest_run)
-    [ "$run" != "$before" ] && grep -q "db-backup: started" "$run/nodes/db-backup/1.log" 2>/dev/null && break
+    [ "$run" != "$before" ] && grep -q "db-backup: started" "$run/db-backup.1.log" 2>/dev/null && break
     sleep 0.1
   done
-  grep -q "db-backup: started" "$run/nodes/db-backup/1.log" 2>/dev/null || {
+  grep -q "db-backup: started" "$run/db-backup.1.log" 2>/dev/null || {
     fail "db-backup never started behind the stalled pipe"
     return
   }
@@ -283,9 +283,9 @@ scenario_plain_stalled_output() {
   local took=$(($(date +%s) - sent))
   expect_status "$(cat "$exitfile")" 1
   [ "$took" -le 10 ] || fail "exit took ${took}s after Ctrl-C"
-  grep -q '"reason": "canceled"' "$run/nodes/db-backup/1.json" || fail "db-backup not recorded as canceled"
-  grep -q '"exit_code": 130' "$run/nodes/db-backup/1.json" || fail "db-backup did not finish its SIGINT cleanup"
-  [ "$(wc -l <"$run/nodes/guard/1.log")" -ge 200000 ] || fail "guard's node log lost output"
+  grep -q '"reason": "canceled"' "$run/db-backup.1.json" || fail "db-backup not recorded as canceled"
+  grep -q '"exit_code": 130' "$run/db-backup.1.json" || fail "db-backup did not finish its SIGINT cleanup"
+  [ "$(wc -l <"$run/guard.1.log")" -ge 200000 ] || fail "guard's node log lost output"
   echo "exited ${took}s after Ctrl-C" >"$out/$scenario.final.txt"
 }
 
@@ -415,8 +415,8 @@ scenario_tui_cancel() {
   local run i
   for ((i = 0; i < 150; i++)); do
     run=$(latest_run)
-    grep -q "hanging until canceled" "$run/nodes/go-check/1.log" 2>/dev/null &&
-      grep -q "db-backup: started" "$run/nodes/db-backup/1.log" 2>/dev/null && break
+    grep -q "hanging until canceled" "$run/go-check.1.log" 2>/dev/null &&
+      grep -q "db-backup: started" "$run/db-backup.1.log" 2>/dev/null && break
     sleep 0.1
   done
   tm send-keys -t smoke C-c
@@ -428,8 +428,8 @@ scenario_tui_cancel() {
   save_screen finished
   check_frame finished 160 45
   quit_and_check 1
-  grep -q "db-backup: lock released, exiting" "$run/nodes/db-backup/1.log" || fail "db-backup did not get its grace period"
-  grep -q '"state": "canceled"' "$run/nodes/release/1.json" || fail "release not recorded as canceled"
+  grep -q "db-backup: lock released, exiting" "$run/db-backup.1.log" || fail "db-backup did not get its grace period"
+  grep -q '"state": "canceled"' "$run/release.1.json" || fail "release not recorded as canceled"
   grep -q '"signal":"interrupt".*signal sent to process group' "$run/weft.log" || fail "weft.log has no SIGINT sent to a process group"
   no_sigterm "$run" db-backup
 }
@@ -439,8 +439,8 @@ scenario_tui_cancel() {
 wait_hanging() {
   local i
   for ((i = 0; i < 150; i++)); do
-    grep -q "hanging until canceled" "$1/nodes/go-check/1.log" 2>/dev/null &&
-      grep -q "db-backup: started" "$1/nodes/db-backup/$2.log" 2>/dev/null && return 0
+    grep -q "hanging until canceled" "$1/go-check.1.log" 2>/dev/null &&
+      grep -q "db-backup: started" "$1/db-backup.$2.log" 2>/dev/null && return 0
     sleep 0.1
   done
   fail "go-check and db-backup attempt $2 never both ran"
@@ -469,14 +469,14 @@ scenario_tui_node_cancel() {
   save_screen node_canceled
   check_frame node_canceled 160 45
   expect node_canceled "deploy  running"
-  grep -q "db-backup: lock released, exiting" "$run/nodes/db-backup/1.log" || fail "db-backup did not get its grace period"
-  grep -q '"reason": "canceled"' "$run/nodes/db-backup/1.json" || fail "db-backup attempt 1 not recorded as canceled"
+  grep -q "db-backup: lock released, exiting" "$run/db-backup.1.log" || fail "db-backup did not get its grace period"
+  grep -q '"reason": "canceled"' "$run/db-backup.1.json" || fail "db-backup attempt 1 not recorded as canceled"
   log_has "$run/weft.log" '"message":"node cancel requested"' '"node":"db-backup"' '"attempt":1' '"action":"cancel_running"' ||
     fail "weft.log lacks the cancel request"
   log_has "$run/weft.log" '"node":"db-backup"' '"attempt":1' '"signal":"interrupt"' "signal sent to process group" ||
     fail "weft.log lacks the SIGINT to db-backup"
   no_sigterm "$run" db-backup
-  grep -q "hanging until canceled" "$run/nodes/go-check/1.log" && [ ! -f "$run/nodes/go-check/1.json" ] ||
+  grep -q "hanging until canceled" "$run/go-check.1.log" && [ ! -f "$run/go-check.1.json" ] ||
     fail "go-check stopped with db-backup"
 
   tm send-keys -t smoke x
@@ -492,7 +492,7 @@ scenario_tui_node_cancel() {
   save_screen node_killed
   log_has "$run/weft.log" '"node":"db-backup"' '"attempt":2' '"signal":"killed"' "signal sent to process group" ||
     fail "weft.log lacks the SIGKILL to db-backup attempt 2"
-  if grep -q "lock released" "$run/nodes/db-backup/2.log"; then fail "the second x waited for the grace period"; fi
+  if grep -q "lock released" "$run/db-backup.2.log"; then fail "the second x waited for the grace period"; fi
 
   tm send-keys -t smoke k k
   wait_screen "› go-check" 5 || return
@@ -510,7 +510,7 @@ scenario_tui_kill() {
   local run i
   for ((i = 0; i < 150; i++)); do
     run=$(latest_run)
-    grep -q "db-backup: started" "$run/nodes/db-backup/1.log" 2>/dev/null && break
+    grep -q "db-backup: started" "$run/db-backup.1.log" 2>/dev/null && break
     sleep 0.1
   done
   tm send-keys -t smoke C-c
@@ -520,7 +520,7 @@ scenario_tui_kill() {
   save_screen finished
   check_frame finished 160 45
   quit_and_check 1
-  if grep -q "lock released" "$run/nodes/db-backup/1.log"; then fail "db-backup finished its cleanup despite the kill"; fi
+  if grep -q "lock released" "$run/db-backup.1.log"; then fail "db-backup finished its cleanup despite the kill"; fi
 }
 
 # ? and i open dialogs over the running screen, which keeps its frame, and
@@ -626,7 +626,7 @@ scenario_tui_flood() {
   # A q right behind an escape parses as alt+q.
   sleep 0.3
   quit_and_check 1
-  [ "$(wc -l <"$(latest_run)/nodes/guard/1.log")" -ge 200000 ] || fail "guard's node log lost output"
+  [ "$(wc -l <"$(latest_run)/guard.1.log")" -ge 200000 ] || fail "guard's node log lost output"
 }
 
 # fail_deploy_plain: a plain run where deploy fails, as the run that the
@@ -656,9 +656,9 @@ scenario_plain_resume() {
   expect final "deploy: rolling out $tag (stub)"
   expect final "succeeded (5 skipped, 2 succeeded)"
   [ "$(latest_run)" = "$run" ] || fail "resume made a new run directory"
-  [ ! -e "$run/nodes/release/2.log" ] || fail "release ran again"
+  [ ! -e "$run/release.2.log" ] || fail "release ran again"
   [ "$(cat "$run/fixture/release-tag")" = "$tag" ] || fail "release-tag changed"
-  grep -q '"state": "succeeded"' "$run/nodes/deploy/2.json" || fail "deploy attempt 2 record is not succeeded"
+  grep -q '"state": "succeeded"' "$run/deploy.2.json" || fail "deploy attempt 2 record is not succeeded"
   grep -q '"mode": "resume"' "$run/state.json" || fail "state.json history lacks the resume"
 }
 
@@ -723,8 +723,8 @@ scenario_tui_resume() {
   quit_and_check 0
   expect final "succeeded (5 skipped, 2 succeeded)"
   [ "$(latest_run)" = "$run" ] || fail "resume made a new run directory"
-  [ ! -e "$run/nodes/release/2.log" ] || fail "release ran again"
-  grep -q "rolling out $tag" "$run/nodes/deploy/2.log" || fail "deploy attempt 2 did not roll out $tag"
+  [ ! -e "$run/release.2.log" ] || fail "release ran again"
+  grep -q "rolling out $tag" "$run/deploy.2.log" || fail "deploy attempt 2 did not roll out $tag"
 }
 
 # r after the run ends starts another pass in the same TUI: the clock and
@@ -742,7 +742,7 @@ scenario_tui_rerun() {
   expect rerun "attempt 2"
   local run
   run=$(latest_run)
-  [ -f "$run/nodes/deploy/2.log" ] || fail "no log for deploy attempt 2"
+  [ -f "$run/deploy.2.log" ] || fail "no log for deploy attempt 2"
   grep -q '"message":"rerun requested"' "$run/weft.log" || fail "weft.log lacks the rerun"
   grep -q '"message":"run restarted for a rerun"' "$run/weft.log" || fail "weft.log lacks the second pass"
   tm send-keys -t smoke l r

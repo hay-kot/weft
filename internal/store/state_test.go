@@ -30,7 +30,7 @@ func TestStateRoundTrip(t *testing.T) {
 	})
 	s.Nodes["release"] = store.NodeState{
 		State: events.Succeeded, Attempt: 2, ExitCode: 0, Reason: "exit", Error: "",
-		Started: at, Finished: at.Add(time.Second), Log: "nodes/release/2.log", PGID: 0,
+		Started: at, Finished: at.Add(time.Second), Log: "release.2.log", PGID: 0,
 	}
 	require.NoError(t, run.WriteState(s))
 

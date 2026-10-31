@@ -214,7 +214,7 @@ func TestPrepareLostAttempts(t *testing.T) {
 
 	deploy := nodeState(events.Running, 2)
 	deploy.PGID = alive.Process.Pid
-	deploy.Log = "nodes/deploy/2.log"
+	deploy.Log = "deploy.2.log"
 	st.Nodes["deploy"] = deploy
 	require.NoError(t, run.WriteState(st))
 
@@ -230,7 +230,7 @@ func TestPrepareLostAttempts(t *testing.T) {
 	data, err := os.ReadFile(run.AttemptRecordPath("deploy", 2))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"reason": "abandoned"`)
-	assert.Contains(t, string(data), `"log": "nodes/deploy/2.log"`)
+	assert.Contains(t, string(data), `"log": "deploy.2.log"`)
 
 	_ = alive.Process.Kill()
 	_ = alive.Wait()

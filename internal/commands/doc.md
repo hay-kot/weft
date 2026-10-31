@@ -103,8 +103,8 @@ the run is resumed).
   lock                     held by the weft process using the run
   events.jsonl             every state change, in order
   weft.log                 weft's JSON log; more detail with --log-level=debug
-  nodes/<node>/<n>.log     output of attempt n, stdout and stderr together
-  nodes/<node>/<n>.json    attempt n: command, dir, times, exit code, signal, reason
+  <node>.<n>.log           output of attempt n, stdout and stderr together
+  <node>.<n>.json          attempt n: command, dir, times, exit code, signal, reason
 ```
 
 weft keeps the newest 20 runs per workflow. Nodes get `WEFT_WORKFLOW`,

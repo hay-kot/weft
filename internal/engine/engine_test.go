@@ -684,7 +684,7 @@ func TestAttemptRecords(t *testing.T) {
 	assert.Equal(t, "failed", rec.State)
 	assert.Equal(t, events.ReasonExit, rec.Reason)
 	assert.Equal(t, 2, rec.ExitCode)
-	assert.Equal(t, "nodes/deploy/1.log", rec.Log)
+	assert.Equal(t, "deploy.1.log", rec.Log)
 	assert.False(t, rec.Started.IsZero())
 	assert.False(t, rec.Finished.Before(rec.Started))
 
