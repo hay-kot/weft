@@ -318,6 +318,9 @@ func TestRunSucceedsInDependencyOrder(t *testing.T) {
 	h := newHarness(t, deployYAML, map[string]behavior{
 		"go-check": {exit: 0, hang: false, signal: "", output: "", delay: 20 * time.Millisecond},
 		"ui-check": {exit: 0, hang: false, signal: "", output: "", delay: 20 * time.Millisecond},
+		// With no delay, this check can end before the others start, and the
+		// peak below is then 2.
+		"db-backup": {exit: 0, hang: false, signal: "", output: "", delay: 20 * time.Millisecond},
 	}, 0)
 	s := h.runToEnd(t)
 
