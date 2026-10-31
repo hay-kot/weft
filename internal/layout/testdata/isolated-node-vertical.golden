@@ -1,0 +1,13 @@
+         gen          validate
+          │
+     ┌────┴────┐
+     ▾         ▾
+  go-check  ui-check
+     │         │
+     │         │
+     ▾         │
+integration    │
+     │         │
+     └────┬────┘
+          ▾
+         e2e
