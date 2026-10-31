@@ -102,8 +102,8 @@ func TestBuildFollowsWorkflowOrder(t *testing.T) {
 
 	run, st := newRun(t, map[string]store.NodeState{
 		"apply":   node(events.Blocked, 1, "blocked: deploy failed", -1, 90*time.Second, ""),
-		nDeploy:   node(events.Failed, 2, "exit code 1", 60*time.Second, 90*time.Second, "nodes/deploy/2.log"),
-		"release": node(events.Succeeded, 1, "", 0, 50*time.Second, "nodes/release/1.log"),
+		nDeploy:   node(events.Failed, 2, "exit code 1", 60*time.Second, 90*time.Second, "deploy.2.log"),
+		"release": node(events.Succeeded, 1, "", 0, 50*time.Second, "release.1.log"),
 		"gone":    node(events.Succeeded, 1, "", 0, time.Second, ""),
 	})
 	r := report.Build(run, st, loadWorkflow(t))
@@ -114,7 +114,7 @@ func TestBuildFollowsWorkflowOrder(t *testing.T) {
 	}
 	assert.Equal(t, []string{"release", nDeploy, "apply", "gone"}, ids, "a node the file no longer has comes last")
 	assert.Equal(t, "Release", r.Nodes[0].Label)
-	assert.Equal(t, filepath.Join(run.Dir, "nodes/deploy/2.log"), r.Nodes[1].Log)
+	assert.Equal(t, filepath.Join(run.Dir, "deploy.2.log"), r.Nodes[1].Log)
 	assert.Equal(t, int64(30000), r.Nodes[1].DurationMS)
 	assert.Equal(t, "2 succeeded · 1 failed · 1 blocked", r.Progress())
 	assert.Equal(t, report.Failed, r.Status)
@@ -124,12 +124,11 @@ func TestText(t *testing.T) {
 	t.Parallel()
 
 	run, st := newRun(t, map[string]store.NodeState{
-		"release": node(events.Succeeded, 1, "", 0, 50*time.Second, "nodes/release/1.log"),
-		nDeploy:   node(events.Failed, 2, "exit code 1", 60*time.Second, 90*time.Second, "nodes/deploy/2.log"),
+		"release": node(events.Succeeded, 1, "", 0, 50*time.Second, "release.1.log"),
+		nDeploy:   node(events.Failed, 2, "exit code 1", 60*time.Second, 90*time.Second, "deploy.2.log"),
 		"apply":   node(events.Blocked, 1, "blocked: deploy failed", -1, 90*time.Second, ""),
 	})
-	require.NoError(t, os.MkdirAll(filepath.Join(run.Dir, "nodes", nDeploy), 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(run.Dir, "nodes/deploy/2.log"), []byte("one\ntwo\nthree\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(run.Dir, "deploy.2.log"), []byte("one\ntwo\nthree\n"), 0o600))
 
 	r := report.Build(run, st, loadWorkflow(t))
 	r.AddLogTails(2)
@@ -143,7 +142,7 @@ func TestText(t *testing.T) {
 		"release  succeeded  0:50\n",
 		"deploy   failed     attempt 2  0:30  exit code 1\n",
 		"apply    blocked    blocked: deploy failed\n",
-		"deploy, attempt 2: failed\nlog " + filepath.Join(run.Dir, "nodes/deploy/2.log") + "\n  two\n  three\n",
+		"deploy, attempt 2: failed\nlog " + filepath.Join(run.Dir, "deploy.2.log") + "\n  two\n  three\n",
 		"weft logs deploy deploy --run " + run.ID,
 		"weft run deploy --resume",
 	} {
@@ -229,7 +228,7 @@ func TestBuildKeepsLogPathsInsideTheRunDir(t *testing.T) {
 	run, st := newRun(t, map[string]store.NodeState{
 		"up":   node(events.Failed, 1, "", 0, time.Second, "../../../../etc/passwd"),
 		"abs":  node(events.Failed, 1, "", 0, time.Second, "/etc/passwd"),
-		"fine": node(events.Failed, 1, "", 0, time.Second, "nodes/fine/1.log"),
+		"fine": node(events.Failed, 1, "", 0, time.Second, "fine.1.log"),
 	})
 	r := report.Build(run, st, nil)
 	byID := map[string]report.Node{}
@@ -238,7 +237,7 @@ func TestBuildKeepsLogPathsInsideTheRunDir(t *testing.T) {
 	}
 	assert.Empty(t, byID["up"].Log)
 	assert.Empty(t, byID["abs"].Log)
-	assert.Equal(t, filepath.Join(run.Dir, "nodes/fine/1.log"), byID["fine"].Log)
+	assert.Equal(t, filepath.Join(run.Dir, "fine.1.log"), byID["fine"].Log)
 }
 
 func TestBuildDropsWhatWeftNeverWrote(t *testing.T) {
@@ -267,12 +266,11 @@ func TestExcludedNodesGetNoLogTail(t *testing.T) {
 	t.Parallel()
 
 	run, st := newRun(t, map[string]store.NodeState{
-		"ship": node(events.Excluded, 1, "", 0, time.Second, "nodes/ship/1.log"),
-		"bad":  node(events.Failed, 1, "exit code 1", 0, time.Second, "nodes/bad/1.log"),
+		"ship": node(events.Excluded, 1, "", 0, time.Second, "ship.1.log"),
+		"bad":  node(events.Failed, 1, "exit code 1", 0, time.Second, "bad.1.log"),
 	})
 	for _, id := range []string{"ship", "bad"} {
-		require.NoError(t, os.MkdirAll(filepath.Join(run.Dir, "nodes", id), 0o700))
-		require.NoError(t, os.WriteFile(filepath.Join(run.Dir, "nodes", id, "1.log"), []byte("old output\n"), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(run.Dir, id+".1.log"), []byte("old output\n"), 0o600))
 	}
 	r := report.Build(run, st, nil)
 	r.AddLogTails(5)

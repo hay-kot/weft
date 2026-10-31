@@ -74,10 +74,6 @@ func TestCreate(t *testing.T) {
 	info, err := os.Stat(run.Dir)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
-
-	nodesInfo, err := os.Stat(filepath.Join(run.Dir, "nodes"))
-	require.NoError(t, err)
-	assert.True(t, nodesInfo.IsDir())
 }
 
 func TestEnsureGitignoreWritesRuns(t *testing.T) {
@@ -138,9 +134,48 @@ func TestRunPaths(t *testing.T) {
 
 	assert.Equal(t, filepath.Join(run.Dir, "weft.log"), run.LogPath())
 	assert.Equal(t, filepath.Join(run.Dir, "events.jsonl"), run.EventsPath())
-	assert.Equal(t, filepath.Join(run.Dir, "nodes", "build", "2.log"), run.AttemptLogPath("build", 2))
-	assert.Equal(t, filepath.Join(run.Dir, "nodes", "build", "2.json"), run.AttemptRecordPath("build", 2))
-	assert.Equal(t, filepath.Join("nodes", "build", "2.log"), run.RelPath(run.AttemptLogPath("build", 2)))
+	assert.Equal(t, filepath.Join(run.Dir, "build.2.log"), run.AttemptLogPath("build", 2))
+	assert.Equal(t, filepath.Join(run.Dir, "build.2.json"), run.AttemptRecordPath("build", 2))
+	assert.Equal(t, "build.2.log", run.RelPath(run.AttemptLogPath("build", 2)))
+}
+
+func TestAttemptFilesAreDirectlyInTheRunDirectory(t *testing.T) {
+	run := mustCreate(t, t.TempDir(), time.Now())
+
+	for _, node := range []string{"weft", "state", "events", "lock"} {
+		f, err := run.CreateAttemptLog(node, 1)
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		rec := store.AttemptRecord{Node: node, Attempt: 1}
+		require.NoError(t, run.WriteAttemptRecord(rec))
+	}
+
+	entries, err := os.ReadDir(run.Dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		assert.False(t, e.IsDir(), "%s is a directory", e.Name())
+		names = append(names, e.Name())
+	}
+	assert.ElementsMatch(t, []string{
+		"weft.1.log", "weft.1.json", "state.1.log", "state.1.json",
+		"events.1.log", "events.1.json", "lock.1.log", "lock.1.json",
+	}, names, "no node file takes the name of one of weft's own")
+}
+
+func TestOldLayoutRunsStayReadable(t *testing.T) {
+	run := mustCreate(t, t.TempDir(), time.Now())
+	oldDir := filepath.Join(run.Dir, "nodes", "build")
+	require.NoError(t, os.MkdirAll(oldDir, 0o700))
+	oldLog := filepath.Join(oldDir, "1.log")
+	oldRecord := filepath.Join(oldDir, "1.json")
+	require.NoError(t, os.WriteFile(oldLog, []byte("old\n"), 0o600))
+	require.NoError(t, os.WriteFile(oldRecord, []byte("{}\n"), 0o600))
+
+	assert.Equal(t, oldLog, run.AttemptLogPath("build", 1))
+	assert.Equal(t, oldRecord, run.AttemptRecordPath("build", 1))
+	assert.Equal(t, filepath.Join(run.Dir, "build.2.log"), run.AttemptLogPath("build", 2), "a resume writes new attempts flat")
+	assert.Equal(t, filepath.Join(run.Dir, "build.2.json"), run.AttemptRecordPath("build", 2))
 }
 
 func TestCreateAttemptLog(t *testing.T) {
@@ -176,7 +211,7 @@ func TestWriteAttemptRecord(t *testing.T) {
 		Error:       "",
 		Started:     time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC),
 		Finished:    time.Date(2026, 3, 4, 5, 6, 9, 0, time.UTC),
-		Log:         "nodes/build/1.log",
+		Log:         "build.1.log",
 	}
 
 	require.NoError(t, run.WriteAttemptRecord(rec))
@@ -199,7 +234,7 @@ func TestWriteAttemptRecord(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	assert.Equal(t, []string{"1.json"}, names)
+	assert.Equal(t, []string{"build.1.json"}, names)
 }
 
 func TestPrune(t *testing.T) {

@@ -371,9 +371,8 @@ func parseTop(top *yaml.Node, wf *Workflow, addf func(string, ...any)) (nodes *y
 	return nodes, defaultShell
 }
 
-// ValidID reports whether id is a well-formed node ID. Node IDs name
-// directories under the run directory, so anything that reads one back from
-// disk checks it again.
+// ValidID reports whether id is a well-formed node ID. Node IDs name files in
+// the run directory, so anything that reads one back from disk checks it again.
 func ValidID(id string) bool {
 	return idPattern.MatchString(id)
 }

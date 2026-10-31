@@ -175,7 +175,7 @@ func TestResumeKeepsPriorForSkipped(t *testing.T) {
 	at := time.Date(2026, 10, 25, 19, 12, 0, 0, time.UTC)
 	release := store.NodeState{
 		State: events.Succeeded, Attempt: 1, ExitCode: 0, Reason: "exit", Error: "",
-		Started: at, Finished: at.Add(time.Minute), Log: "nodes/release/1.log", PGID: 0,
+		Started: at, Finished: at.Add(time.Minute), Log: "release.1.log", PGID: 0,
 	}
 	pr := deployFailed()
 	pr.Nodes[nRelease] = release

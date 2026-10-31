@@ -218,7 +218,7 @@ func TestOutputIsSanitizedAndDropsAreNoted(t *testing.T) {
 	assert.Equal(t, "ok", buf.at(0).Text)
 	assert.True(t, buf.at(1).Notice)
 	assert.Contains(t, buf.at(1).Text, "42 lines not shown here")
-	assert.Contains(t, buf.at(1).Text, testRun().Dir+"/nodes/guard/1.log")
+	assert.Contains(t, buf.at(1).Text, testRun().Dir+"/guard.1.log")
 }
 
 func TestBarrierIsAcknowledged(t *testing.T) {

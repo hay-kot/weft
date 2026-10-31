@@ -4,12 +4,15 @@
 // Layout:
 //
 //	.weft/runs/<workflow>/<run-id>/
-//	  weft.log                 weft's JSON log for this run
-//	  state.json               node states and history, for resume
-//	  lock                     held by the weft process using the run
-//	  events.jsonl            engine events, one JSON object per line
-//	  nodes/<node>/<n>.log     combined output of attempt n
-//	  nodes/<node>/<n>.json    AttemptRecord for attempt n
+//	  weft.log          weft's JSON log for this run
+//	  state.json        node states and history, for resume
+//	  lock              held by the weft process using the run
+//	  events.jsonl      engine events, one JSON object per line
+//	  <node>.<n>.log    combined output of attempt n
+//	  <node>.<n>.json   AttemptRecord for attempt n
+//
+// Node IDs cannot contain a dot, so the attempt number keeps a node's files
+// apart from weft's own, even for a node named weft or state.
 package store
 
 import (
@@ -37,8 +40,11 @@ import (
 const (
 	LogFile    = "weft.log"
 	EventsFile = "events.jsonl"
-	NodesDir   = "nodes"
 	RunsDir    = "runs"
+
+	// legacyNodesDir held attempt files as nodes/<node>/<n>.log before they
+	// moved to the top of the run directory.
+	legacyNodesDir = "nodes"
 )
 
 // KeepRuns is how many runs per workflow survive pruning.
@@ -97,9 +103,6 @@ func Create(root, workflowName string, now time.Time) (*Run, error) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("create run directory: %w", err)
-		}
-		if err := os.Mkdir(filepath.Join(dir, NodesDir), dirMode); err != nil {
 			return nil, fmt.Errorf("create run directory: %w", err)
 		}
 		return &Run{ID: id, Dir: dir, Workflow: workflowName}, nil
@@ -220,12 +223,24 @@ func (r *Run) EventsPath() string { return filepath.Join(r.Dir, EventsFile) }
 
 // AttemptLogPath returns the output log path for a node attempt.
 func (r *Run) AttemptLogPath(node string, attempt int) string {
-	return filepath.Join(r.Dir, NodesDir, node, strconv.Itoa(attempt)+".log")
+	return r.attemptPath(node, attempt, ".log")
 }
 
 // AttemptRecordPath returns the record path for a node attempt.
 func (r *Run) AttemptRecordPath(node string, attempt int) string {
-	return filepath.Join(r.Dir, NodesDir, node, strconv.Itoa(attempt)+".json")
+	return r.attemptPath(node, attempt, ".json")
+}
+
+// attemptPath falls back to the old layout only for a file that is there, so
+// runs from before the flat layout can still be read and resumed. New attempts
+// always land at the top of the run directory.
+func (r *Run) attemptPath(node string, attempt int, ext string) string {
+	n := strconv.Itoa(attempt)
+	legacy := filepath.Join(r.Dir, legacyNodesDir, node, n+ext)
+	if _, err := os.Lstat(legacy); err == nil {
+		return legacy
+	}
+	return filepath.Join(r.Dir, node+"."+n+ext)
 }
 
 // OpenLog opens weft's own log for appending.
@@ -293,9 +308,6 @@ func readRegular(path string, limit int64) ([]byte, error) {
 // CreateAttemptLog creates the output log for a node attempt.
 func (r *Run) CreateAttemptLog(node string, attempt int) (*os.File, error) {
 	path := r.AttemptLogPath(node, attempt)
-	if err := os.MkdirAll(filepath.Dir(path), dirMode); err != nil {
-		return nil, err
-	}
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode) //nolint:gosec // path is built from a validated node ID
 }
 
