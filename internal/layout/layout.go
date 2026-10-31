@@ -13,6 +13,7 @@ package layout
 
 import (
 	"cmp"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -47,14 +48,8 @@ func (o Orientation) String() string {
 // DefaultMaxCellWidth caps a node cell's display width.
 const DefaultMaxCellWidth = 20
 
-const (
-	// hGutter is the width between columns: " ─┼─▸ ".
-	hGutter = 6
-	// vGutter is the height between rows: stems, the bus, arrowheads.
-	vGutter = 3
-	// vGap is the space between cells in one row of a vertical layout.
-	vGap = 2
-)
+// vGap is the space between cells in one row of a vertical layout.
+const vGap = 2
 
 // Node is one node of the graph to lay out.
 type Node struct {
@@ -184,8 +179,8 @@ func (g *Grid) EdgesOf(id string) []int {
 type item struct {
 	id    string
 	real  bool
-	edge  int // for dummies: index into edges
-	decl  int // declaration index of the node, or of the dummy's source
+	edges []int // for dummies: indexes into builder.edges
+	decl  int   // declaration index of the node, or of the dummy's source
 	level int
 	text  string // rendered cell, real items only
 	width int
@@ -215,10 +210,11 @@ func Layout(g Graph, opts Options) *Grid {
 
 	orient := opts.Orientation
 	if orient == Auto {
-		orient = Horizontal
-		if opts.Width > 0 && b.horizontalWidth() > opts.Width {
-			orient = Vertical
+		h := b.renderHorizontal()
+		if opts.Width <= 0 || h.Width <= opts.Width {
+			return h
 		}
+		orient = Vertical
 	}
 
 	if orient == Vertical {
@@ -270,13 +266,21 @@ func build(g Graph) *builder {
 	b.levels = make([][]*item, maxLevel+1)
 	for _, n := range g.Nodes {
 		it := &item{
-			id: n.ID, real: true, edge: -1, decl: decl[n.ID], level: level[n.ID],
+			id: n.ID, real: true, edges: nil, decl: decl[n.ID], level: level[n.ID],
 			text: "", width: 0, preds: nil, succs: nil, pos: 0,
 		}
 		b.byID[n.ID] = it
 		b.levels[it.level] = append(b.levels[it.level], it)
 	}
 
+	// Skip edges from one source share a dummy per level. A dummy each would
+	// add a row of line per edge, and those rows run level with unrelated
+	// nodes and join their trunks, which draws dependencies that do not exist.
+	type dummyKey struct {
+		src   *item
+		level int
+	}
+	dummies := map[dummyKey]*item{}
 	for _, n := range g.Nodes {
 		for _, need := range n.Needs {
 			src, ok := b.byID[need]
@@ -288,11 +292,17 @@ func build(g Graph) *builder {
 			b.edges = append(b.edges, Edge{From: need, To: n.ID})
 			prev := src
 			for l := src.level + 1; l < dst.level; l++ {
-				d := &item{
-					id: "", real: false, edge: ei, decl: src.decl, level: l,
-					text: "", width: 1, preds: nil, succs: nil, pos: 0,
+				key := dummyKey{src: src, level: l}
+				d, shared := dummies[key]
+				if !shared {
+					d = &item{
+						id: "", real: false, edges: nil, decl: src.decl, level: l,
+						text: "", width: 1, preds: nil, succs: nil, pos: 0,
+					}
+					dummies[key] = d
+					b.levels[l] = append(b.levels[l], d)
 				}
-				b.levels[l] = append(b.levels[l], d)
+				d.edges = append(d.edges, ei)
 				b.link(prev, d, ei)
 				prev = d
 			}
@@ -318,8 +328,10 @@ func boolInt(v bool) int {
 }
 
 func (b *builder) link(from, to *item, edge int) {
-	from.succs = append(from.succs, to)
-	to.preds = append(to.preds, from)
+	if !slices.Contains(from.succs, to) {
+		from.succs = append(from.succs, to)
+		to.preds = append(to.preds, from)
+	}
 	b.segments = append(b.segments, segment{from: from, to: to, edge: edge})
 }
 
@@ -403,14 +415,6 @@ func (b *builder) cellText(opts Options) {
 	}
 }
 
-func (b *builder) horizontalWidth() int {
-	w := 0
-	for _, lv := range b.levels {
-		w += levelWidth(lv)
-	}
-	return w + hGutter*max(0, len(b.levels)-1)
-}
-
 func levelWidth(lv []*item) int {
 	w := 1
 	for _, it := range lv {
@@ -426,8 +430,78 @@ func levelWidth(lv []*item) int {
 // keep their order and stay gap apart. The best positions under those
 // constraints come from isotonic regression (pool adjacent violators),
 // which keeps a fan-out centered on its parent instead of hanging below it.
+//
+// Connected components are placed separately and stacked. Rounding moves a
+// component a little on every sweep, and an item with no neighbors stays put,
+// so placing them together opens gaps that grow with the sweeps.
 func (b *builder) place(size func(*item) int, gap int) {
+	comps := b.components()
+	next := 0
+	for _, levels := range comps {
+		placeComponent(levels, size, gap)
+		end := next
+		for _, lv := range levels {
+			for _, it := range lv {
+				it.pos += next
+				end = max(end, it.pos+size(it)+gap)
+			}
+		}
+		next = end
+	}
+	for l := range b.levels {
+		b.levels[l] = b.levels[l][:0]
+		for _, levels := range comps {
+			b.levels[l] = append(b.levels[l], levels[l]...)
+		}
+	}
+}
+
+// components splits the levels by connected component, ordered by each
+// component's first declared node. Items keep their order within a level.
+func (b *builder) components() [][][]*item {
+	var items []*item
 	for _, lv := range b.levels {
+		items = append(items, lv...)
+	}
+	slices.SortStableFunc(items, func(a, c *item) int { return cmp.Compare(a.decl, c.decl) })
+
+	comp := map[*item]int{}
+	var mark func(it *item, id int)
+	mark = func(it *item, id int) {
+		if _, seen := comp[it]; seen {
+			return
+		}
+		comp[it] = id
+		for _, n := range it.preds {
+			mark(n, id)
+		}
+		for _, n := range it.succs {
+			mark(n, id)
+		}
+	}
+	count := 0
+	for _, it := range items {
+		if _, seen := comp[it]; !seen {
+			mark(it, count)
+			count++
+		}
+	}
+
+	out := make([][][]*item, count)
+	for i := range out {
+		out[i] = make([][]*item, len(b.levels))
+	}
+	for l, lv := range b.levels {
+		for _, it := range lv {
+			out[comp[it]][l] = append(out[comp[it]][l], it)
+		}
+	}
+	return out
+}
+
+// placeComponent positions one component with its lowest item at zero.
+func placeComponent(levels [][]*item, size func(*item) int, gap int) {
+	for _, lv := range levels {
 		pos := 0
 		for _, it := range lv {
 			it.pos = pos
@@ -436,23 +510,23 @@ func (b *builder) place(size func(*item) int, gap int) {
 	}
 	preds := func(it *item) []*item { return it.preds }
 	succs := func(it *item) []*item { return it.succs }
-	for l := 1; l < len(b.levels); l++ {
-		align(b.levels[l], preds, size, gap)
+	for l := 1; l < len(levels); l++ {
+		align(levels[l], preds, size, gap)
 	}
-	for l := len(b.levels) - 2; l >= 0; l-- {
-		align(b.levels[l], succs, size, gap)
+	for l := len(levels) - 2; l >= 0; l-- {
+		align(levels[l], succs, size, gap)
 	}
-	for l := 1; l < len(b.levels); l++ {
-		align(b.levels[l], preds, size, gap)
+	for l := 1; l < len(levels); l++ {
+		align(levels[l], preds, size, gap)
 	}
 
-	low := 0
-	for _, lv := range b.levels {
+	low := math.MaxInt
+	for _, lv := range levels {
 		for _, it := range lv {
 			low = min(low, it.pos)
 		}
 	}
-	for _, lv := range b.levels {
+	for _, lv := range levels {
 		for _, it := range lv {
 			it.pos -= low
 		}
@@ -613,22 +687,254 @@ func (b *builder) grid(c *canvas, orient Orientation) *Grid {
 	return g
 }
 
+// bundle is a set of sources that all feed the same targets. One line joins
+// them, because every source really does reach every target. Sources with
+// different targets get different bundles, or the shared line would draw
+// edges that do not exist.
+type bundle struct {
+	segs     []segment
+	sources  []int
+	targets  []int
+	lo, hi   int
+	track    int
+	straight bool
+}
+
+// routeGutter groups the segments between two levels into bundles and gives
+// each a track, the line it runs along between the levels. A source's line
+// must end before the line of a target on the same row starts, so bundles
+// that would swap rows both ways cannot be separated and share one line.
+func routeGutter(segs []segment, cross func(*item) int) ([]*bundle, int) {
+	bundles := groupBundles(segs, cross)
+	markStraight(bundles)
+	for {
+		tracks, stuck := assignTracks(bundles)
+		if len(stuck) == 0 {
+			return bundles, max(1, tracks)
+		}
+		bundles = mergeBundles(bundles, stuck)
+	}
+}
+
+// mergeBundles replaces the stuck bundles with one bundle that holds them all.
+func mergeBundles(bundles, stuck []*bundle) []*bundle {
+	merged := &bundle{lo: stuck[0].lo, hi: stuck[0].hi}
+	out := []*bundle{merged}
+	for _, bl := range bundles {
+		if !slices.Contains(stuck, bl) {
+			out = append(out, bl)
+			continue
+		}
+		merged.segs = append(merged.segs, bl.segs...)
+		merged.sources = append(merged.sources, bl.sources...)
+		for _, t := range bl.targets {
+			if !slices.Contains(merged.targets, t) {
+				merged.targets = append(merged.targets, t)
+			}
+		}
+		merged.lo, merged.hi = min(merged.lo, bl.lo), max(merged.hi, bl.hi)
+	}
+	return out
+}
+
+func groupBundles(segs []segment, cross func(*item) int) []*bundle {
+	targets := map[int][]int{}
+	var sources []int
+	for _, s := range segs {
+		from, to := cross(s.from), cross(s.to)
+		if _, seen := targets[from]; !seen {
+			sources = append(sources, from)
+		}
+		if !slices.Contains(targets[from], to) {
+			targets[from] = append(targets[from], to)
+		}
+	}
+	byKey := map[string]*bundle{}
+	bySource := map[int]*bundle{}
+	var out []*bundle
+	for _, from := range sources {
+		slices.Sort(targets[from])
+		key := fmt.Sprint(targets[from])
+		bl := byKey[key]
+		if bl == nil {
+			bl = &bundle{targets: targets[from], lo: from, hi: from}
+			for _, t := range targets[from] {
+				bl.lo, bl.hi = min(bl.lo, t), max(bl.hi, t)
+			}
+			byKey[key] = bl
+			out = append(out, bl)
+		}
+		bl.sources = append(bl.sources, from)
+		bl.lo, bl.hi = min(bl.lo, from), max(bl.hi, from)
+		bySource[from] = bl
+	}
+	for _, s := range segs {
+		bl := bySource[cross(s.from)]
+		bl.segs = append(bl.segs, s)
+	}
+	return out
+}
+
+// markStraight finds lines that run level from one source to one target and
+// need no track, unless another bundle joins that target's row.
+func markStraight(bundles []*bundle) {
+	for _, bl := range bundles {
+		bl.straight = len(bl.sources) == 1 && len(bl.targets) == 1 && bl.sources[0] == bl.targets[0]
+		if !bl.straight {
+			continue
+		}
+		for _, other := range bundles {
+			if other != bl && slices.Contains(other.targets, bl.targets[0]) {
+				bl.straight = false
+			}
+		}
+	}
+}
+
+// assignTracks returns the track count, or the bundles caught in a cycle of
+// row constraints. Bundles share a track when their spans do not touch.
+func assignTracks(bundles []*bundle) (int, []*bundle) {
+	before := func(a, c *bundle) bool {
+		return a != c && slices.ContainsFunc(a.sources, func(s int) bool { return slices.Contains(c.targets, s) })
+	}
+	var todo, done []*bundle
+	for _, bl := range bundles {
+		if !bl.straight {
+			todo = append(todo, bl)
+		}
+	}
+	tracks := 0
+	for len(todo) > 0 {
+		next := slices.IndexFunc(todo, func(bl *bundle) bool {
+			return !slices.ContainsFunc(todo, func(a *bundle) bool { return before(a, bl) })
+		})
+		if next < 0 {
+			return 0, todo
+		}
+		bl := todo[next]
+		todo = slices.Delete(todo, next, next+1)
+		bl.track = 0
+		for _, a := range done {
+			if before(a, bl) {
+				bl.track = max(bl.track, a.track+1)
+			}
+		}
+		for slices.ContainsFunc(done, func(a *bundle) bool {
+			return a.track == bl.track && a.lo <= bl.hi && bl.lo <= a.hi
+		}) {
+			bl.track++
+		}
+		done = append(done, bl)
+		tracks = max(tracks, bl.track+1)
+	}
+	return tracks, nil
+}
+
+// trackCell is one cell of a gutter's tracks, in the gutter's own frame:
+// before and after run along the flow, lower and higher across it.
+type trackCell struct {
+	before, after, lower, higher bool
+	trunk, pass                  bool
+	edges                        []int
+}
+
+func paintTracks(bundles []*bundle, tracks int, cross func(*item) int) map[[2]int]*trackCell {
+	cells := map[[2]int]*trackCell{}
+	at := func(track, c, edge int) *trackCell {
+		k := [2]int{track, c}
+		if cells[k] == nil {
+			cells[k] = &trackCell{}
+		}
+		if !slices.Contains(cells[k].edges, edge) {
+			cells[k].edges = append(cells[k].edges, edge)
+		}
+		return cells[k]
+	}
+	for _, bl := range bundles {
+		for _, s := range bl.segs {
+			from, to := cross(s.from), cross(s.to)
+			if bl.straight {
+				for t := range tracks {
+					at(t, from, s.edge).pass = true
+				}
+				continue
+			}
+			lo, hi := min(from, to), max(from, to)
+			for c := lo; c <= hi; c++ {
+				cell := at(bl.track, c, s.edge)
+				cell.trunk = true
+				cell.lower = cell.lower || c > lo
+				cell.higher = cell.higher || c < hi
+			}
+			at(bl.track, from, s.edge).before = true
+			at(bl.track, to, s.edge).after = true
+			for t := range bl.track {
+				at(t, from, s.edge).pass = true
+			}
+			for t := bl.track + 1; t < tracks; t++ {
+				at(t, to, s.edge).pass = true
+			}
+		}
+	}
+	return cells
+}
+
+// glyph returns the box glyph for the cell. A line that crosses a bundle it
+// has no part in draws as the bundle's own vertical line, not as a ┼, because
+// ┼ means the lines join.
+func (c *trackCell) glyph(vertical bool) string {
+	switch {
+	case !c.trunk && vertical:
+		return "│"
+	case !c.trunk:
+		return "─"
+	case c.pass && !c.before && !c.after:
+		return "│"
+	}
+	before, after := c.before || c.pass, c.after || c.pass
+	if vertical {
+		return junction(before, after, c.lower, c.higher)
+	}
+	return junction(c.lower, c.higher, before, after)
+}
+
+func (b *builder) segmentsFrom(l int) []segment {
+	var segs []segment
+	for _, s := range b.segments {
+		if s.from.level == l {
+			segs = append(segs, s)
+		}
+	}
+	return segs
+}
+
 func (b *builder) renderHorizontal() *Grid {
 	b.place(func(*item) int { return 1 }, 0)
+	pos := func(it *item) int { return it.pos }
 
+	type gutter struct {
+		bundles []*bundle
+		tracks  int
+	}
+	gutters := make([]gutter, max(0, len(b.levels)-1))
 	colX := make([]int, len(b.levels))
 	colW := make([]int, len(b.levels))
 	x, height := 0, 0
 	for l, lv := range b.levels {
 		colX[l] = x
 		colW[l] = levelWidth(lv)
-		x += colW[l] + hGutter
+		x += colW[l]
+		if l < len(gutters) {
+			bundles, tracks := routeGutter(b.segmentsFrom(l), pos)
+			gutters[l] = gutter{bundles, tracks}
+			// Gutter: " ─", the tracks, "─▸ ".
+			x += tracks + 5
+		}
 		for _, it := range lv {
 			height = max(height, it.pos+1)
 		}
 	}
-	width := max(0, x-hGutter)
-	c := newCanvas(width, height)
+	c := newCanvas(x, height)
 
 	for l, lv := range b.levels {
 		for _, it := range lv {
@@ -637,54 +943,35 @@ func (b *builder) renderHorizontal() *Grid {
 				continue
 			}
 			for dx := range colW[l] {
-				c.set(colX[l]+dx, it.pos, "─", it.edge)
+				c.set(colX[l]+dx, it.pos, "─", it.edges...)
 			}
 		}
 	}
 
-	// Gutter after level l: " ─┼─▸ ". Column 2 is the trunk.
-	for l := 0; l+1 < len(b.levels); l++ {
+	for l, gt := range gutters {
 		gx := colX[l] + colW[l]
-		trunk := gx + 2
-		var segs []segment
-		for _, s := range b.segments {
-			if s.from.level == l {
-				segs = append(segs, s)
-			}
-		}
-		for _, s := range segs {
-			start := gx
-			if s.from.real {
-				start = colX[l] + s.from.width + 1
-			}
-			for xx := start; xx < trunk; xx++ {
-				c.set(xx, s.from.pos, "─", s.edge)
-			}
-			c.set(trunk+1, s.to.pos, "─", s.edge)
-			if s.to.real {
-				c.set(trunk+2, s.to.pos, "▸", s.edge)
-			} else {
-				c.set(trunk+2, s.to.pos, "─", s.edge)
-				c.set(trunk+3, s.to.pos, "─", s.edge)
-			}
-		}
-		for y := range height {
-			var up, down, left, right bool
-			var through []int
-			for _, s := range segs {
-				lo, hi := min(s.from.pos, s.to.pos), max(s.from.pos, s.to.pos)
-				if y < lo || y > hi {
-					continue
+		first := gx + 2
+		end := first + gt.tracks
+		for _, bl := range gt.bundles {
+			for _, s := range bl.segs {
+				start := gx
+				if s.from.real {
+					start = colX[l] + s.from.width + 1
 				}
-				through = append(through, s.edge)
-				left = left || s.from.pos == y
-				right = right || s.to.pos == y
-				up = up || y > lo
-				down = down || y < hi
+				for xx := start; xx < first; xx++ {
+					c.set(xx, s.from.pos, "─", s.edge)
+				}
+				c.set(end, s.to.pos, "─", s.edge)
+				if s.to.real {
+					c.set(end+1, s.to.pos, "▸", s.edge)
+				} else {
+					c.set(end+1, s.to.pos, "─", s.edge)
+					c.set(end+2, s.to.pos, "─", s.edge)
+				}
 			}
-			if len(through) > 0 {
-				c.set(trunk, y, junction(up, down, left, right), through...)
-			}
+		}
+		for k, cell := range paintTracks(gt.bundles, gt.tracks, pos) {
+			c.set(first+k[0], k[1], cell.glyph(false), cell.edges...)
 		}
 	}
 
@@ -695,6 +982,7 @@ func (b *builder) renderHorizontal() *Grid {
 
 func (b *builder) renderVertical() *Grid {
 	b.place(func(it *item) int { return it.width }, vGap)
+	center := func(it *item) int { return it.pos + (it.width-1)/2 }
 
 	width := 0
 	for _, lv := range b.levels {
@@ -702,60 +990,56 @@ func (b *builder) renderVertical() *Grid {
 			width = max(width, it.pos+it.width)
 		}
 	}
-	height := max(0, len(b.levels)*(1+vGutter)-vGutter)
-	c := newCanvas(width, height)
-	rowY := func(l int) int { return l * (1 + vGutter) }
-	center := func(it *item) int { return it.pos + (it.width-1)/2 }
+	type gutter struct {
+		bundles []*bundle
+		tracks  int
+	}
+	gutters := make([]gutter, max(0, len(b.levels)-1))
+	rows := make([]int, len(b.levels))
+	y := 0
+	for l := range b.levels {
+		rows[l] = y
+		y++
+		if l < len(gutters) {
+			bundles, tracks := routeGutter(b.segmentsFrom(l), center)
+			gutters[l] = gutter{bundles, tracks}
+			// Gutter: stems, the tracks, arrowheads.
+			y += tracks + 2
+		}
+	}
+	c := newCanvas(width, y)
 
 	for l, lv := range b.levels {
 		for _, it := range lv {
 			if it.real {
-				c.text(it.pos, rowY(l), it.text, it.id)
+				c.text(it.pos, rows[l], it.text, it.id)
 			} else {
-				c.set(it.pos, rowY(l), "│", it.edge)
+				c.set(it.pos, rows[l], "│", it.edges...)
 			}
 		}
 	}
 
-	for l := 0; l+1 < len(b.levels); l++ {
-		stem, bus, head := rowY(l)+1, rowY(l)+2, rowY(l)+3
-		var segs []segment
-		for _, s := range b.segments {
-			if s.from.level == l {
-				segs = append(segs, s)
-			}
-		}
-		for _, s := range segs {
-			c.set(center(s.from), stem, "│", s.edge)
-			if s.to.real {
-				c.set(center(s.to), head, "▾", s.edge)
-			} else {
-				c.set(center(s.to), head, "│", s.edge)
-			}
-		}
-		for x := range width {
-			var up, down, left, right bool
-			var through []int
-			for _, s := range segs {
-				xs, xt := center(s.from), center(s.to)
-				lo, hi := min(xs, xt), max(xs, xt)
-				if x < lo || x > hi {
-					continue
+	for l, gt := range gutters {
+		stem := rows[l] + 1
+		first := stem + 1
+		head := first + gt.tracks
+		for _, bl := range gt.bundles {
+			for _, s := range bl.segs {
+				c.set(center(s.from), stem, "│", s.edge)
+				if s.to.real {
+					c.set(center(s.to), head, "▾", s.edge)
+				} else {
+					c.set(center(s.to), head, "│", s.edge)
 				}
-				through = append(through, s.edge)
-				up = up || xs == x
-				down = down || xt == x
-				left = left || x > lo
-				right = right || x < hi
 			}
-			if len(through) > 0 {
-				c.set(x, bus, junction(up, down, left, right), through...)
-			}
+		}
+		for k, cell := range paintTracks(gt.bundles, gt.tracks, center) {
+			c.set(k[1], first+k[0], cell.glyph(true), cell.edges...)
 		}
 	}
 
 	g := b.grid(c, Vertical)
-	b.boxes(g, func(it *item) (int, int) { return it.pos, rowY(it.level) })
+	b.boxes(g, func(it *item) (int, int) { return it.pos, rows[it.level] })
 	return g
 }
 

@@ -34,6 +34,30 @@ var deploy = graph(
 	node("tofu-apply", "deploy"),
 )
 
+var isolatedNode = graph(
+	node("gen"),
+	node("validate"),
+	node("go-check", "gen"),
+	node("ui-check", "gen"),
+	node("integration", "go-check"),
+	node("e2e", "integration", "ui-check"),
+)
+
+var sharedSkip = graph(
+	node("start"),
+	node("go-check", "start"),
+	node("ui-check", "start"),
+	node("e2e", "go-check", "ui-check"),
+	node("backup", "start"),
+	node("release", "e2e", "backup"),
+	node("apply", "e2e", "backup"),
+)
+
+var lineCrossesConnector = graph(
+	node("a"), node("b", "a"), node("c", "b"), node("d", "c", "a"),
+	node("e", "d"), node("f", "e", "b"), node("g", "f", "a", "b"), node("h", "g"),
+)
+
 // tuiCell mimics the TUI's cells: an icon, the label, and a duration.
 func tuiCell(id string) layout.Cell {
 	icons := map[string]string{"guard": "✓", "go-check": "✓", "ui-check": "✓", "db-backup": "✓", "release": "●", "tofu-apply": "◆"}
@@ -74,6 +98,12 @@ func TestGolden(t *testing.T) {
 		), opts(layout.Auto, 0)},
 		{"diamond", graph(node("top"), node("left", "top"), node("right", "top"), node("bottom", "left", "right")), opts(layout.Auto, 0)},
 		{"two-components", graph(node("a1"), node("a2", "a1"), node("b1"), node("b2", "b1"), node("b3", "b2")), opts(layout.Auto, 0)},
+		{"isolated-node", isolatedNode, opts(layout.Auto, 0)},
+		{"isolated-node-vertical", isolatedNode, opts(layout.Vertical, 0)},
+		{"shared-skip", sharedSkip, opts(layout.Horizontal, 0)},
+		{"shared-skip-vertical", sharedSkip, opts(layout.Vertical, 0)},
+		{"line-crosses-connector", lineCrossesConnector, opts(layout.Horizontal, 0)},
+		{"line-crosses-connector-vertical", lineCrossesConnector, opts(layout.Vertical, 0)},
 		{"crossing", graph(node("p"), node("q"), node("r", "q"), node("s", "p")), opts(layout.Auto, 0)},
 		{"single", graph(node("only")), opts(layout.Auto, 0)},
 		{"truncated-labels", graph(
@@ -155,6 +185,22 @@ func TestGlyphsCarryTheirEdges(t *testing.T) {
 	assert.ElementsMatch(t, []int{0, 1}, g.EdgesOf("a"))
 	assert.Equal(t, []int{1}, g.EdgesOf("c"))
 	assert.Equal(t, " ", g.At(-1, 0).Text)
+}
+
+func TestSharedSkipCarriesEveryEdge(t *testing.T) {
+	g := layout.Layout(graph(node("a"), node("b", "a"), node("c", "a", "b"), node("d", "a", "b")), opts(layout.Horizontal, 0))
+	require.Equal(t, layout.Edge{From: "a", To: "c"}, g.Edges[1])
+	require.Equal(t, layout.Edge{From: "a", To: "d"}, g.Edges[3])
+
+	b := g.Boxes["b"]
+	passes := 0
+	for y := range g.Height {
+		if gl := g.At(b.X, y); y != b.Y && gl.Text == "─" {
+			assert.ElementsMatch(t, []int{1, 3}, gl.Edges)
+			passes++
+		}
+	}
+	assert.Equal(t, 1, passes, "a's skip edges should share one row:\n%s", g.String())
 }
 
 func TestWideLabels(t *testing.T) {

@@ -1,0 +1,3 @@
+          ┌─▸ go-check ───▸ integration ─┬─▸ e2e
+gen ──────┴─▸ ui-check ──────────────────┘
+validate
