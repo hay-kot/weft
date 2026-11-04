@@ -70,17 +70,44 @@ func (m cellMode) cell(id string) layout.Cell {
 type scenario struct {
 	orient layout.Orientation
 	cells  cellMode
+	// width is the layout width; 1 makes a horizontal layout wrap at every
+	// cut it has.
+	width int
+}
+
+func (sc scenario) String() string {
+	name := sc.orient.String()
+	if sc.width > 0 {
+		name += "-wrapped"
+	}
+	return name + "/" + sc.cells.String()
+}
+
+func scenarios() []scenario {
+	var out []scenario
+	for _, o := range []scenario{{layout.Horizontal, 0, 0}, {layout.Vertical, 0, 0}, {layout.Horizontal, 0, 1}} {
+		for m := range cellModeCount {
+			out = append(out, scenario{o.orient, m, o.width})
+		}
+	}
+	return out
 }
 
 func render(g layout.Graph, sc scenario) *layout.Grid {
-	return layout.Layout(g, layout.Options{Width: 0, Orientation: sc.orient, Cell: sc.cells.cell, MaxCellWidth: 0})
+	return layout.Layout(g, layout.Options{Width: sc.width, Orientation: sc.orient, Cell: sc.cells.cell, MaxCellWidth: 0})
 }
 
-// exits returns where a node's outgoing lines start.
+// exits returns where a node's outgoing lines start. In a wrapped layout a
+// node's lines into the next band leave its bracketed copy, one column
+// further out for the closing bracket.
 func exits(g *layout.Grid, id string) []point {
 	b := g.Boxes[id]
 	if g.Orientation == layout.Horizontal {
-		return []point{{b.X + b.Width + 1, b.Y}}
+		out := []point{{b.X + b.Width + 1, b.Y}}
+		if c, ok := g.Copies[id]; ok {
+			out = append(out, point{c.X + c.Width + 2, c.Y})
+		}
+		return out
 	}
 	out := make([]point, 0, b.Width)
 	for x := b.X; x < b.X+b.Width; x++ {
@@ -213,7 +240,7 @@ func check(gr layout.Graph, sc scenario) []violation {
 	out = append(out, checkTags(g)...)
 	out = append(out, danglingLines(g)...)
 	out = append(out, wastedSpace(gr, g)...)
-	if sc.orient == layout.Vertical && g.Width > render(gr, scenario{layout.Horizontal, sc.cells}).Width {
+	if sc.orient == layout.Vertical && g.Width > render(gr, scenario{layout.Horizontal, sc.cells, 0}).Width {
 		add("vertical-wider-than-horizontal", "vertical is %d wide", g.Width)
 	}
 	return out
@@ -352,7 +379,7 @@ func wastedSpace(gr layout.Graph, g *layout.Grid) []violation {
 	var out []violation
 	lines := g.Lines()
 	for y := 1; y+1 < len(lines); y++ {
-		if lines[y] == "" {
+		if lines[y] == "" && !slices.Contains(g.Bands, y+1) {
 			out = append(out, violation{"blank-row", fmt.Sprintf("row %d", y)})
 		}
 	}
@@ -618,14 +645,11 @@ func TestRandomGraphInvariants(t *testing.T) {
 	r := rand.New(rand.NewPCG(3, 4))
 	for range 500 {
 		g := generate(r)
-		for _, o := range []layout.Orientation{layout.Horizontal, layout.Vertical} {
-			for m := range cellModeCount {
-				sc := scenario{o, m}
-				for _, v := range check(g, sc) {
-					if slices.Contains(hard, v.category) {
-						small := shrink(g, sc, v.category)
-						t.Fatalf("%s (%s/%s): %s\ngraph: %s\n%s", v.category, o, m, v.detail, describe(small), render(small, sc))
-					}
+		for _, sc := range scenarios() {
+			for _, v := range check(g, sc) {
+				if slices.Contains(hard, v.category) {
+					small := shrink(g, sc, v.category)
+					t.Fatalf("%s (%s): %s\ngraph: %s\n%s", v.category, sc, v.detail, describe(small), render(small, sc))
 				}
 			}
 		}
@@ -651,12 +675,7 @@ func TestRandomGraphsReport(t *testing.T) {
 	}
 	findings := map[string]*finding{}
 	r := rand.New(rand.NewPCG(1, 2))
-	scenarios := []scenario{}
-	for _, o := range []layout.Orientation{layout.Horizontal, layout.Vertical} {
-		for m := range cellModeCount {
-			scenarios = append(scenarios, scenario{o, m})
-		}
-	}
+	scenarios := scenarios()
 	anyFalse := map[string][2]int{}
 	for range graphs {
 		g := generate(r)
@@ -682,7 +701,7 @@ func TestRandomGraphsReport(t *testing.T) {
 				if !seen[v.category] {
 					seen[v.category] = true
 					f.graphs++
-					f.scs[fmt.Sprintf("%s/%s", sc.orient, sc.cells)]++
+					f.scs[sc.String()]++
 					if !f.have || size(g) < size(f.smallG) {
 						f.smallG, f.smallSc, f.have = g, sc, true
 					}
@@ -713,7 +732,7 @@ func TestRandomGraphsReport(t *testing.T) {
 			fmt.Fprintf(&b, "  %-24s %d\n", k, f.scs[k])
 		}
 		small := shrink(f.smallG, f.smallSc, c)
-		fmt.Fprintf(&b, "smallest (%s/%s): %s\n", f.smallSc.orient, f.smallSc.cells, describe(small))
+		fmt.Fprintf(&b, "smallest (%s): %s\n", f.smallSc, describe(small))
 		fmt.Fprintln(&b, render(small, f.smallSc).String())
 		for _, v := range check(small, f.smallSc) {
 			if v.category == c {
@@ -742,9 +761,9 @@ func TestRandomGraphsSnapshots(t *testing.T) {
 		}
 		i++
 		fmt.Fprintf(&b, "--- #%d %s\n", i, describe(g))
-		fmt.Fprintln(&b, render(g, scenario{layout.Horizontal, cellPlain}).String())
+		fmt.Fprintln(&b, render(g, scenario{layout.Horizontal, cellPlain, 0}).String())
 		fmt.Fprintln(&b)
-		fmt.Fprintln(&b, render(g, scenario{layout.Vertical, cellPlain}).String())
+		fmt.Fprintln(&b, render(g, scenario{layout.Vertical, cellPlain, 0}).String())
 		fmt.Fprintln(&b)
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {

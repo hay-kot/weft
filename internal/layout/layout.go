@@ -27,7 +27,10 @@ import (
 // Orientation picks the direction of the layout.
 type Orientation int
 
-// Orientations. Auto is horizontal unless that is wider than Options.Width.
+// Orientations. Auto is horizontal unless that is wider than Options.Width;
+// then it wraps the horizontal layout into bands, and when a band is still
+// too wide it is vertical. Horizontal wraps too, but keeps a band that does
+// not fit.
 const (
 	Auto Orientation = iota
 	Horizontal
@@ -83,8 +86,8 @@ type Cell struct {
 
 // Options configures Layout.
 type Options struct {
-	// Width is the space available. With Auto, a horizontal layout wider
-	// than Width falls back to vertical. Zero means unlimited.
+	// Width is the space available. A horizontal layout wider than Width
+	// wraps into bands (see Orientation). Zero means unlimited.
 	Width       int
 	Orientation Orientation
 	// Cell returns the text for a node. Nil uses the node ID as the label.
@@ -133,6 +136,15 @@ type Grid struct {
 	// Levels holds the real node IDs of each level in display order.
 	Levels [][]string
 	Boxes  map[string]Box
+	// Copies holds the second cell of each node where a wrapped layout
+	// breaks: the node ends one band and starts the next, drawn in brackets
+	// there. The box covers the cell text inside the brackets, so it has
+	// the same width as the node's own box; the brackets carry the node ID
+	// too. Box.Level and Box.Index match the node's own box.
+	Copies map[string]Box
+	// Bands holds the first row of each band of a wrapped layout, and is
+	// nil when the layout is not wrapped. A blank row separates the bands.
+	Bands []int
 
 	glyphs [][]Glyph
 }
@@ -204,23 +216,33 @@ func Layout(g Graph, opts Options) *Grid {
 		opts.Cell = func(id string) Cell { return Cell{Prefix: "", Label: id, Suffix: ""} }
 	}
 
+	b := prepare(g, opts)
+	if opts.Orientation == Vertical {
+		return b.renderVertical()
+	}
+
+	h := b.renderHorizontal()
+	if opts.Width <= 0 || h.Width <= opts.Width {
+		return h
+	}
+	w := wrap(g, opts, b)
+	switch {
+	case opts.Orientation == Horizontal && w != nil && w.Width < h.Width:
+		return w
+	case opts.Orientation == Horizontal:
+		return h
+	case w != nil && w.Width <= opts.Width:
+		return w
+	default:
+		return b.renderVertical()
+	}
+}
+
+func prepare(g Graph, opts Options) *builder {
 	b := build(g)
 	b.order()
 	b.cellText(opts)
-
-	orient := opts.Orientation
-	if orient == Auto {
-		h := b.renderHorizontal()
-		if opts.Width <= 0 || h.Width <= opts.Width {
-			return h
-		}
-		orient = Vertical
-	}
-
-	if orient == Vertical {
-		return b.renderVertical()
-	}
-	return b.renderHorizontal()
+	return b
 }
 
 type builder struct {
@@ -672,6 +694,8 @@ func (b *builder) grid(c *canvas, orient Orientation) *Grid {
 		Edges:       b.edges,
 		Levels:      make([][]string, len(b.levels)),
 		Boxes:       map[string]Box{},
+		Copies:      map[string]Box{},
+		Bands:       nil,
 		glyphs:      c.glyphs,
 	}
 	if len(c.glyphs) > 0 {

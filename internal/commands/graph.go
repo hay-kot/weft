@@ -43,7 +43,10 @@ func (cmd *GraphCmd) Register(app *cli.Command) *cli.Command {
 		ArgsUsage: "<workflow>",
 		Description: `Prints the workflow's nodes in levels, with edges drawn between them: the
 same layout the TUI shows during a run. Levels run left to right; when that
-is wider than the terminal, they run top to bottom instead.
+is wider than the terminal, the graph wraps into bands at nodes that every
+later edge passes through, and each band after the first starts with that
+node in brackets. When a band is still too wide, levels run top to bottom
+instead. --layout horizontal wraps too, but keeps a band that does not fit.
 
 With --json, prints one object: workflow, orientation, levels (node IDs per
 level), nodes (id, label, level, needs), and lines (the drawing).

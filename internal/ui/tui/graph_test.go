@@ -95,8 +95,8 @@ func TestGraphSelectionVertical(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.from+"/"+tt.moves, func(t *testing.T) {
-			p, _ := deployPane(t, 40, 30)
-			assert.Equal(t, layout.Vertical, p.grid.Orientation, "40 columns is too narrow for horizontal")
+			p, _ := deployPane(t, 30, 30)
+			assert.Equal(t, layout.Vertical, p.grid.Orientation, "30 columns is too narrow for horizontal, even wrapped")
 			p = p.selectNode(tt.from)
 			for _, r := range tt.moves {
 				p, _ = p.Update(press(string(r)), keys)
@@ -127,7 +127,7 @@ func TestGraphToggleLayoutSticks(t *testing.T) {
 
 func TestGraphScrollsSelectionIntoView(t *testing.T) {
 	// Vertical layout of the fixture is 17 rows; show 5 of them.
-	p, _ := deployPane(t, 40, 5)
+	p, _ := deployPane(t, 30, 5)
 	assert.Equal(t, 5, p.rows())
 	assert.Equal(t, 17, p.fullHeight())
 	assert.Equal(t, 0, p.offY)
@@ -166,11 +166,11 @@ func TestGraphClassify(t *testing.T) {
 
 	b := p.grid.Boxes[nRelease]
 	icon := p.classify(b.X, b.Y, p.grid.At(b.X, b.Y), rs, active)
-	assert.Equal(t, glyphClass{kind: glyphIcon, state: events.Running, selected: false}, icon)
+	assert.Equal(t, glyphClass{kind: glyphIcon, state: events.Running, selected: false, copied: false}, icon)
 	label := p.classify(b.X+2, b.Y, p.grid.At(b.X+2, b.Y), rs, active)
-	assert.Equal(t, glyphClass{kind: glyphLabel, state: events.Running, selected: true}, label)
+	assert.Equal(t, glyphClass{kind: glyphLabel, state: events.Running, selected: true, copied: false}, label)
 	suffix := p.classify(b.X+b.Width-1, b.Y, p.grid.At(b.X+b.Width-1, b.Y), rs, active)
-	assert.Equal(t, glyphClass{kind: glyphSuffix, state: events.Running, selected: false}, suffix)
+	assert.Equal(t, glyphClass{kind: glyphSuffix, state: events.Running, selected: false, copied: false}, suffix)
 
 	// The gutter between release and deploy carries release's edge.
 	edge := p.classify(b.X+b.Width+1, b.Y, p.grid.At(b.X+b.Width+1, b.Y), rs, active)
@@ -180,6 +180,25 @@ func TestGraphClassify(t *testing.T) {
 	g := p.grid.Boxes[nGuard]
 	other := p.classify(g.X+g.Width+1, g.Y, p.grid.At(g.X+g.Width+1, g.Y), rs, active)
 	assert.Equal(t, glyphEdge, other.kind)
+}
+
+func TestGraphClassifyWrappedCopy(t *testing.T) {
+	p, rs := deployPane(t, 60, 20)
+	rs.nodes[nDeploy].State = events.Running
+	rs.nodes[nDeploy].Started = t0
+	p = p.withCells(rs.cells(t0)).selectNode(nDeploy)
+	c, ok := p.grid.Copies[nDeploy]
+	if !assert.True(t, ok, "60 columns should wrap after deploy:\n%s", p.grid.String()) {
+		return
+	}
+
+	icon := p.classify(c.X, c.Y, p.grid.At(c.X, c.Y), rs, nil)
+	assert.Equal(t, glyphClass{kind: glyphIcon, state: events.Running, selected: false, copied: true}, icon)
+	label := p.classify(c.X+2, c.Y, p.grid.At(c.X+2, c.Y), rs, nil)
+	assert.Equal(t, glyphClass{kind: glyphLabel, state: events.Running, selected: true, copied: true}, label)
+	bracket := p.classify(c.X-1, c.Y, p.grid.At(c.X-1, c.Y), rs, nil)
+	assert.Equal(t, glyphLabel, bracket.kind)
+	assert.False(t, bracket.selected, "the selection marks only the label text")
 }
 
 // markedText returns, per line, the text drawn bold and underlined, and

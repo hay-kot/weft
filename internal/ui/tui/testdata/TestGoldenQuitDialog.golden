@@ -1,21 +1,21 @@
  deploy  running  0:00  4/7 done                   run 20261025T191200.000-a3f9
  run dir /repo/.weft/runs/deploy/20261025T191200.000-a3f9
 ────────────────────────────────────────────────────────────────────────────────
-                     ✓ guard 0:00
-                          │
+               ┌─▸ ✓ go-check  0:02 ─┐
+ ✓ guard 0:00 ─┼─▸ ✓ ui-check  0:02 ─┼─▸ ⠋ release 0:00 ───▸ ○ deploy
         ╭──────────────────────────────────────────────────────────────╮
         │                                                              │
- ✓ go-ch│  Quit while the run is going?                                │
-        │  ──────────────────────────────────────────────────────────  │
-        │  Running nodes get SIGINT and their grace period, then weft  │
-        │  quits once they stop. Nodes that have not started do not    │
+ [○ depl│  Quit while the run is going?                                │
+────────│  ──────────────────────────────────────────────────────────  │────────
+ › relea│  Running nodes get SIGINT and their grace period, then weft  │
+ • build│  quits once they stop. Nodes that have not started do not    │
         │  run.                                                        │
         │                                                              │
         │   Cancel run and quit    Keep running                        │
         │                                                              │
-────────│  y yes • n/esc no • ←/→ select • enter choose                │────────
- › relea│                                                              │
- • build╰──────────────────────────────────────────────────────────────╯
+        │  y yes • n/esc no • ←/→ select • enter choose                │
+        │                                                              │
+        ╰──────────────────────────────────────────────────────────────╯
 
 
 

@@ -196,8 +196,20 @@ guard ─┼─▸ ui-check ──┼─▸ release ───▸ deploy ──�
        └─▸ db-backup ─┘
 ```
 
-Levels run left to right. When that is wider than the terminal, they run
-top to bottom instead. `--layout=horizontal|vertical` forces one, `--width`
+Levels run left to right. When that is wider than the terminal, the graph
+wraps into bands at nodes that every later edge passes through, and the next
+band starts with that node in brackets:
+
+```text
+       ┌─▸ go-check ──┐
+guard ─┼─▸ ui-check ──┼─▸ release
+       └─▸ db-backup ─┘
+
+[release] ───▸ deploy ───▸ tofu-apply
+```
+
+When a band is still too wide, levels run top to bottom instead.
+`--layout=horizontal|vertical` forces one (horizontal still wraps), `--width`
 sets the width to fit (default: the terminal's), and `--json` prints nodes,
 levels, and the drawn lines. Where many nodes fan into many, edges share a
 trunk, so the drawing can suggest an edge that isn't there; `needs` in the

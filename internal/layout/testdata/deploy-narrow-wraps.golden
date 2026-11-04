@@ -1,0 +1,5 @@
+       ┌─▸ go-check ──┐
+guard ─┼─▸ ui-check ──┼─▸ release
+       └─▸ db-backup ─┘
+
+[release] ───▸ deploy ───▸ tofu-apply

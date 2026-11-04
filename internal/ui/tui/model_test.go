@@ -482,7 +482,7 @@ func TestGoldenFinished(t *testing.T) {
 	golden.RequireEqual(t, screen(m))
 }
 
-func TestGoldenNarrowFallsBackToVertical(t *testing.T) {
+func TestGoldenNarrowWrapsIntoBands(t *testing.T) {
 	m, _ := newModel(t, 80, 24)
 	m = send(t, m, checksPassed(), tickMsg{at: at(10)})
 	golden.RequireEqual(t, screen(m))
