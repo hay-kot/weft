@@ -216,6 +216,9 @@ type glyphClass struct {
 	kind     glyphKind
 	state    events.State
 	selected bool
+	// copied marks the bracketed copy that starts a band of a wrapped
+	// layout; its label is dimmed so the node reads as the one above.
+	copied bool
 }
 
 type glyphKind int
@@ -234,7 +237,10 @@ func (p graphPane) classify(x, y int, gl layout.Glyph, rs *runState, active map[
 	if gl.Node != "" {
 		st := rs.state(gl.Node)
 		sel := gl.Node == p.selected
-		b := p.grid.Boxes[gl.Node]
+		b, copied := p.grid.Boxes[gl.Node], false
+		if c, ok := p.grid.Copies[gl.Node]; ok && y == c.Y {
+			b, copied = c, true
+		}
 		off := x - b.X
 		cell := p.cells[gl.Node]
 		suffixStart := b.Width - ansi.StringWidth(cell.Suffix)
@@ -242,25 +248,25 @@ func (p graphPane) classify(x, y int, gl layout.Glyph, rs *runState, active map[
 		labelEnd := min(labelStart+ansi.StringWidth(cell.Label), suffixStart)
 		switch {
 		case y == b.Y && off == 0:
-			return glyphClass{kind: glyphIcon, state: st, selected: false}
+			return glyphClass{kind: glyphIcon, state: st, selected: false, copied: copied}
 		case off >= suffixStart:
-			return glyphClass{kind: glyphSuffix, state: st, selected: false}
+			return glyphClass{kind: glyphSuffix, state: st, selected: false, copied: copied}
 		default:
 			// Only the label text carries the selection, so the marker
 			// never runs under the padding or into the icon's state color.
 			onText := off >= labelStart && off < labelEnd
-			return glyphClass{kind: glyphLabel, state: st, selected: sel && onText}
+			return glyphClass{kind: glyphLabel, state: st, selected: sel && onText, copied: copied}
 		}
 	}
 	for _, e := range gl.Edges {
 		if active[e] {
-			return glyphClass{kind: glyphEdgeActive, state: "", selected: false}
+			return glyphClass{kind: glyphEdgeActive, state: "", selected: false, copied: false}
 		}
 	}
 	if len(gl.Edges) > 0 {
-		return glyphClass{kind: glyphEdge, state: "", selected: false}
+		return glyphClass{kind: glyphEdge, state: "", selected: false, copied: false}
 	}
-	return glyphClass{kind: glyphBlank, state: "", selected: false}
+	return glyphClass{kind: glyphBlank, state: "", selected: false, copied: false}
 }
 
 // render styles one run of glyphs. The selected label is marked with one
@@ -284,8 +290,10 @@ func (c glyphClass) style(s Styles) lipgloss.Style {
 	case glyphIcon:
 		st = s.State(c.state)
 	case glyphLabel:
-		switch c.state {
-		case events.Pending, events.Ready:
+		switch {
+		case c.copied:
+			st = s.Dim
+		case c.state == events.Pending, c.state == events.Ready:
 			st = s.Dim
 		default:
 			st = lipgloss.NewStyle()
@@ -310,7 +318,7 @@ func (p graphPane) View(rs *runState, s Styles, now time.Time) string {
 	lines := make([]string, 0, p.rows())
 	for y := p.offY; y < p.offY+p.rows(); y++ {
 		var line, run strings.Builder
-		cur := glyphClass{kind: glyphBlank, state: "", selected: false}
+		cur := glyphClass{kind: glyphBlank, state: "", selected: false, copied: false}
 		flush := func() {
 			if run.Len() > 0 {
 				line.WriteString(cur.render(s, run.String()))

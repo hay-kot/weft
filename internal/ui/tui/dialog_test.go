@@ -37,9 +37,9 @@ func TestQuestionDialogScrolls(t *testing.T) {
 func TestSelectedLabelKeepsItsWidth(t *testing.T) {
 	m, _ := newModel(t, 80, 24)
 	for _, label := range []string{"👨\u200d👩\u200d👧 family", "e\u0301 done", "plain label"} {
-		c := glyphClass{kind: glyphLabel, state: events.Succeeded, selected: true}
+		c := glyphClass{kind: glyphLabel, state: events.Succeeded, selected: true, copied: false}
 		assert.Equal(t, ansi.StringWidth(label), ansi.StringWidth(c.render(m.styles, label)), label)
-		plain := glyphClass{kind: glyphLabel, state: events.Succeeded, selected: false}
+		plain := glyphClass{kind: glyphLabel, state: events.Succeeded, selected: false, copied: false}
 		assert.Equal(t, ansi.StringWidth(label), ansi.StringWidth(plain.render(m.styles, label)), label)
 	}
 }

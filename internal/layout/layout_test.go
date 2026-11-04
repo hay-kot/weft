@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -86,7 +87,10 @@ func TestGolden(t *testing.T) {
 		{"deploy", deploy, opts(layout.Auto, 0)},
 		{"deploy-tui-cells", deploy, layout.Options{Width: 0, Orientation: layout.Horizontal, Cell: tuiCell, MaxCellWidth: 0}},
 		{"deploy-vertical", deploy, opts(layout.Vertical, 0)},
-		{"deploy-narrow-falls-back-to-vertical", deploy, opts(layout.Auto, 40)},
+		{"deploy-narrow-wraps", deploy, opts(layout.Auto, 40)},
+		{"deploy-too-narrow-to-wrap-falls-back-to-vertical", deploy, opts(layout.Auto, 30)},
+		{"deploy-horizontal-wraps-past-width", deploy, opts(layout.Horizontal, 30)},
+		{"deploy-tui-cells-wrapped", deploy, layout.Options{Width: 60, Orientation: layout.Horizontal, Cell: tuiCell, MaxCellWidth: 0}},
 		{"fan-out", graph(node("root"), node("a", "root"), node("b", "root"), node("c", "root"), node("d", "root"), node("e", "root")), opts(layout.Auto, 0)},
 		{"fan-in", graph(node("a"), node("b"), node("c"), node("d"), node("sink", "a", "b", "c", "d")), opts(layout.Auto, 0)},
 		{"fan-in-vertical", graph(node("a"), node("b"), node("c"), node("d"), node("sink", "a", "b", "c", "d")), opts(layout.Vertical, 0)},
@@ -142,8 +146,51 @@ func TestAutoOrientation(t *testing.T) {
 	assert.Equal(t, layout.Horizontal, wide.Orientation)
 	fits := layout.Layout(deploy, opts(layout.Auto, wide.Width))
 	assert.Equal(t, layout.Horizontal, fits.Orientation)
-	narrow := layout.Layout(deploy, opts(layout.Auto, wide.Width-1))
-	assert.Equal(t, layout.Vertical, narrow.Orientation)
+	wrapped := layout.Layout(deploy, opts(layout.Auto, wide.Width-1))
+	assert.Equal(t, layout.Horizontal, wrapped.Orientation)
+	assert.NotNil(t, wrapped.Bands, "a narrower width wraps into bands")
+	assert.Nil(t, fits.Bands)
+	narrow := layout.Layout(deploy, opts(layout.Auto, 30))
+	assert.Equal(t, layout.Vertical, narrow.Orientation, "the fan-out band alone is wider than 30")
+}
+
+const nRelease = "release"
+
+func TestWrappedBands(t *testing.T) {
+	g := layout.Layout(deploy, opts(layout.Auto, 40))
+	require.Equal(t, []int{0, 4}, g.Bands, "\n%s", g.String())
+	assert.Equal(t, [][]string{
+		{"guard"}, {"go-check", "ui-check", "db-backup"}, {nRelease}, {"deploy"}, {"tofu-apply"},
+	}, g.Levels)
+
+	box := g.Boxes[nRelease]
+	assert.Equal(t, 2, box.Level)
+	assert.Equal(t, 1, box.Y)
+	copied, ok := g.Copies[nRelease]
+	require.True(t, ok)
+	assert.Equal(t, layout.Box{ID: nRelease, Level: 2, Index: 0, X: 1, Y: 4, Width: box.Width}, copied)
+	assert.Len(t, g.Copies, 1)
+
+	var text strings.Builder
+	for x := copied.X - 1; x <= copied.X+copied.Width; x++ {
+		assert.Equal(t, nRelease, g.At(x, copied.Y).Node)
+		text.WriteString(g.At(x, copied.Y).Text)
+	}
+	assert.Equal(t, "[release]", text.String())
+	assert.Equal(t, "deploy", g.Boxes["deploy"].ID)
+	assert.Equal(t, 4, g.Boxes["deploy"].Y)
+
+	toDeploy := slices.Index(g.Edges, layout.Edge{From: nRelease, To: "deploy"})
+	require.GreaterOrEqual(t, toDeploy, 0)
+	exit := g.At(copied.X+copied.Width+2, copied.Y)
+	assert.Equal(t, "─", exit.Text)
+	assert.Equal(t, []int{toDeploy}, exit.Edges, "the line out of the copy carries release -> deploy")
+}
+
+func TestWrapNeedsACut(t *testing.T) {
+	g := layout.Layout(graph(node("a"), node("b"), node("c", "a", "b"), node("d", "a", "b")), opts(layout.Auto, 5))
+	assert.Equal(t, layout.Vertical, g.Orientation)
+	assert.Nil(t, g.Bands)
 }
 
 func TestLevelsAndBoxes(t *testing.T) {
