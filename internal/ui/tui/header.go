@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/hay-kot/weft/internal/events"
@@ -66,20 +67,20 @@ func runPhase(rs *runState, cancelLevel int) phase {
 	}
 }
 
-func (p phase) style(s Styles) func(...string) string {
+func (p phase) style(s Styles) lipgloss.Style {
 	switch p {
 	case phaseSucceeded:
-		return s.succeeded.Render
+		return s.succeeded
 	case phaseFailed, phaseKilling:
-		return s.failed.Render
+		return s.failed
 	case phaseCanceled, phaseCanceling:
-		return s.stopped.Render
+		return s.stopped
 	case phaseRunning:
-		return s.running.Render
+		return s.running
 	case phaseStarting:
-		return s.idle.Render
+		return s.idle
 	default:
-		return s.idle.Render
+		return s.idle
 	}
 }
 
@@ -102,8 +103,8 @@ func progress(rs *runState) string {
 	return strings.Join(parts, ", ")
 }
 
-// header is the two rows at the top: the run's status, and the run
-// directory where its logs are.
+// header is the row at the top with the run's status. The run directory
+// is in the debug info that y copies, not on screen.
 type header struct {
 	width int
 }
@@ -113,28 +114,18 @@ func (h header) withWidth(w int) header {
 	return h
 }
 
-// View draws exactly two rows.
+// View draws exactly one row. The run ID is the first thing to go when
+// the row is short.
 func (h header) View(rs *runState, ph phase, now time.Time, s Styles) string {
 	left := " " + strings.Join([]string{
 		s.Title.Render(rs.wf.Name),
-		ph.style(s)(ph.String()),
+		ph.style(s).Render(ph.String()),
 		ui.FormatDuration(rs.elapsed(now)),
 		s.Dim.Render(progress(rs)),
 	}, "  ")
-	// The run ID is also the last part of the run dir below, so it is the
-	// first thing to go when the row is short.
 	right := s.Dim.Render("run "+rs.run.ID) + " "
-	top := ansi.Truncate(left, h.width, "…")
 	if ansi.StringWidth(left)+ansi.StringWidth(right)+1 <= h.width {
-		top = fit(left, right, h.width)
+		return fit(left, right, h.width)
 	}
-
-	// A long run dir loses its start, never its label or the run ID.
-	const label = " run dir "
-	dir := rs.run.Dir
-	if room := h.width - len(label); ansi.StringWidth(dir) > room && room > 1 {
-		dir = ansi.TruncateLeft(dir, ansi.StringWidth(dir)-room+1, "…")
-	}
-	bottom := ansi.Truncate(s.Dim.Render(label+dir), h.width, "")
-	return top + "\n" + bottom
+	return ansi.Truncate(left, h.width, "…")
 }

@@ -70,7 +70,7 @@ func TestLogPaneViewIsExactlyItsSize(t *testing.T) {
 		for _, h := range []int{0, 1, 5} {
 			p := newLogPane(nGuard).withSize(w, h)
 			lines := splitLines(p.View(rs, DefaultStyles(), t0))
-			assert.Len(t, lines, h+1, "%dx%d", w, h)
+			assert.Len(t, lines, h+3, "%dx%d", w, h)
 			for _, l := range lines {
 				assert.LessOrEqual(t, ansi.StringWidth(l), w, "%dx%d: %q", w, h, l)
 			}

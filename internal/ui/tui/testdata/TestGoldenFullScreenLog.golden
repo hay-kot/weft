@@ -1,4 +1,5 @@
- › deploy  ✗ failed: exit code 1  0:01  log /repo/.weft/runs/deploy/20261025T19…
+ deploy  ✗ failed: exit code 1  0:01  log /repo/.weft/runs/deploy/20261025T1912…
+────────────────────────────────────────────────────────────────────────────────
  deploy: rolling out v0.0.0-stub (stub)
  deploy: failing on request (WEFT_FIXTURE_FAIL)
 
@@ -19,6 +20,5 @@
 
 
 
-
 ────────────────────────────────────────────────────────────────────────────────
- esc/q back • j/k scroll • pgdn/ctrl+d page down • g/G top/bottom …
+ esc back • ? help • j/k scroll • pgup/dn page • g/G top/end • h/l sideways …

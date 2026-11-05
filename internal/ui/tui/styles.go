@@ -11,7 +11,11 @@ import (
 // own 16-color palette, so they follow its theme on light and dark
 // backgrounds alike.
 type Styles struct {
-	Title      lipgloss.Style
+	Title lipgloss.Style
+	// LogName labels the log heading.
+	LogName    lipgloss.Style
+	Toast      lipgloss.Style
+	ToastWarn  lipgloss.Style
 	Dim        lipgloss.Style
 	Rule       lipgloss.Style
 	Edge       lipgloss.Style
@@ -52,6 +56,9 @@ func DefaultStyles() Styles {
 	h.Ellipsis = dim
 	return Styles{
 		Title:      base.Bold(true),
+		LogName:    base.Bold(true).Underline(true),
+		Toast:      base.Border(lipgloss.RoundedBorder()).Padding(0, 1),
+		ToastWarn:  base.Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Yellow).Padding(0, 1),
 		Dim:        dim,
 		Rule:       dim,
 		Edge:       dim,

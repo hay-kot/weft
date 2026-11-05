@@ -27,6 +27,8 @@ type KeyMap struct {
 	Help       key.Binding
 	// Info opens the selected node's details.
 	Info key.Binding
+	// Copy copies debug info about the run and the selected node.
+	Copy key.Binding
 	// Confirm, Decline, Choose, and NextButton answer a question dialog.
 	Confirm    key.Binding
 	Decline    key.Binding
@@ -58,6 +60,7 @@ func DefaultKeyMap() KeyMap {
 		Quit:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Info:       key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
+		Copy:       key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy debug")),
 		Confirm:    key.NewBinding(key.WithKeys("y", "Y"), key.WithHelp("y", "yes")),
 		Decline:    key.NewBinding(key.WithKeys("n", "N", "esc"), key.WithHelp("n/esc", "no")),
 		Choose:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "choose")),
@@ -68,20 +71,31 @@ func DefaultKeyMap() KeyMap {
 // selectHelp stands in for the four selection keys in the short help.
 var selectHelp = key.NewBinding(key.WithKeys("h", "j", "k", "l"), key.WithHelp("hjkl", "select"))
 
+// Footer-only bindings: shorter labels, or one entry for several keys, so
+// the one-row footer fits more. The help dialog spells them out.
+var (
+	rerunHelp = key.NewBinding(key.WithKeys("r", "R"), key.WithHelp("r/R", "rerun"))
+	copyHelp  = key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy"))
+	pageHelp  = key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/dn", "page"))
+	jumpHelp  = key.NewBinding(key.WithKeys("g", "G"), key.WithHelp("g/G", "top/end"))
+	sideHelp  = key.NewBinding(key.WithKeys("h", "l"), key.WithHelp("h/l", "sideways"))
+	backHelp  = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
+)
+
 // mainHelp is the short help for the graph view. The cancel keys show
-// only while a pass runs.
+// only while a pass runs. Help and quit come early so a narrow footer
+// still shows them.
 func (k KeyMap) mainHelp(running bool) []key.Binding {
 	cancel, cancelNode := k.Cancel, k.CancelNode
 	cancel.SetEnabled(running)
 	cancelNode.SetEnabled(running)
-	return []key.Binding{selectHelp, k.Open, cancel, k.Quit, k.Help, k.Rerun, k.RerunAll, cancelNode, k.Info, k.Follow, k.Layout}
+	return []key.Binding{selectHelp, k.Open, k.Help, k.Quit, cancel, copyHelp, rerunHelp, cancelNode, k.Info, k.Follow, k.Layout}
 }
 
 // logHelp is the short help for the full-screen log.
 func (k KeyMap) logHelp() []key.Binding {
 	scroll := key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "scroll"))
-	jump := key.NewBinding(key.WithKeys("g", "G"), key.WithHelp("g/G", "top/bottom"))
-	return []key.Binding{k.Close, scroll, k.PageDown, jump, k.ScrollL, k.Follow, k.Help}
+	return []key.Binding{backHelp, k.Help, scroll, pageHelp, jumpHelp, sideHelp, k.Follow, copyHelp}
 }
 
 // helpEntry is one row of the help dialog. The key comes from the binding,
@@ -105,6 +119,7 @@ func (k KeyMap) graphHelp() []helpSection {
 			{selectHelp, "select the node in that direction"},
 			{k.Layout, "switch between horizontal and vertical"},
 			{k.Info, "details of the selected node"},
+			{k.Copy, "copy debug info for the selected node, to paste into an issue or an LLM"},
 		}},
 		{"Log", []helpEntry{
 			{k.Open, "open the selected node's log full screen"},
@@ -141,6 +156,7 @@ func (k KeyMap) logViewHelp() []helpSection {
 		}},
 		{"Run", []helpEntry{
 			{k.Cancel, "cancel the run; again kills every node"},
+			{k.Copy, "copy debug info for this node, to paste into an issue or an LLM"},
 		}},
 		k.generalHelp(),
 	}

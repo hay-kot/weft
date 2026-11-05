@@ -107,16 +107,17 @@ graph live, with the selected node's output under it:
 
 ```text
  deploy  running  1:33  4/7 done                               run 20261025T191200.482-a3f9
- run dir /src/app/.weft/runs/deploy/20261025T191200.482-a3f9
 ───────────────────────────────────────────────────────────────────────────────────────────
                ┌─▸ ✓ go-check  0:02 ─┐
  ✓ guard 0:00 ─┼─▸ ✓ ui-check  0:02 ─┼─▸ ⠹ release 1:31 ───▸ ○ deploy ───▸ ○ tofu-apply
                └─▸ ✓ db-backup 0:01 ─┘
+
 ───────────────────────────────────────────────────────────────────────────────────────────
- › release  ● running  1:31  mise run release
+ release  ● running  1:31  mise run release
+───────────────────────────────────────────────────────────────────────────────────────────
  • building binaries  layout=dist
 ───────────────────────────────────────────────────────────────────────────────────────────
- hjkl select • enter log • ctrl+c cancel • q quit • ? help • r rerun • R rerun+downstream
+ hjkl select • enter log • ? help • q quit • ctrl+c cancel • y copy • r/R rerun • x cancel node
 ```
 
 Icons: `○` pending, a spinner for running, `◆` waiting for the terminal,
@@ -131,13 +132,14 @@ failure) until you move it. Keys:
 | --- | --- |
 | `h` `j` `k` `l`, arrows | Move the selection on screen |
 | `enter` | Full-screen log of the selected node (`esc` or `q` goes back) |
-| `pgup` `pgdn`, `ctrl+u` `ctrl+d` | Scroll the log; `g` and `G` jump to the top and bottom |
+| `pgup` `pgdn`, `ctrl+u` `ctrl+d`, mouse wheel | Scroll the log; `g` and `G` jump to the top and bottom. The wheel always scrolls the log, never the selection |
 | `r` | Rerun the selected node, if its needs are satisfied |
 | `R` | Rerun the selected node and everything downstream of it |
 | `x` | Cancel the selected node: SIGINT and its `kill_timeout` if it runs, again to kill it. Nodes that need it are blocked; the rest of the run goes on |
 | `f` | Pause or resume following the log's newest lines |
 | `v` | Switch between the horizontal and vertical graph |
 | `i` | Details of the selected node: needs, what needs it, command, dir, shell, timeouts, and its latest attempt with exit code and log path |
+| `y` | Copy debug info to the clipboard: the run dir and log paths, every node's state, and the selected node's command and last 50 lines of output, ready to paste into an issue or an LLM |
 | `ctrl+c` | Cancel the run; again to kill the running nodes |
 | `q` | Quit. During a run it asks first, and Yes cancels the run and quits once the nodes stop |
 | `?` | A dialog with every key of the current view, in sections |
@@ -155,6 +157,10 @@ In the full-screen log, `j` `k` scroll by a line and `h` `l` scroll
 sideways through long lines. The TUI keeps the last 10,000 lines of each
 node; the node log on disk has all of them, and its path is in the
 full-screen log's title.
+
+The TUI reads the mouse so the wheel can scroll the log. To select text
+on screen, hold `shift` while dragging (`option` in iTerm2), or press `y`
+to copy the debug info instead.
 
 `r` and `R` work while the run is going and after it ends. A rerun is a new
 attempt of the node, in the same run directory, and its log in the TUI
