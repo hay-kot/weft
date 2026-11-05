@@ -93,8 +93,7 @@ check_frame() {
   rows=$(wc -l <"$file" | tr -d ' ')
   [ "$rows" -eq "$h" ] || fail "$1: $rows rows, want $h"
   sed -n 1p "$file" | grep -q '^ deploy  ' || fail "$1: row 1 is not the header: $(sed -n 1p "$file")"
-  sed -n 2p "$file" | grep -q '^ run dir ' || fail "$1: row 2 is not the run dir: $(sed -n 2p "$file")"
-  [ "$(sed -n 3p "$file" | tr -d ' ')" = "$(printf '%*s' "$w" '' | sed 's/ /─/g')" ] || fail "$1: row 3 is not a full-width rule"
+  [ "$(sed -n 2p "$file" | tr -d ' ')" = "$(printf '%*s' "$w" '' | sed 's/ /─/g')" ] || fail "$1: row 2 is not a full-width rule"
   sed -n "${h}p" "$file" | grep -qE 'help|back|quit' || fail "$1: last row is not the key help: $(sed -n "${h}p" "$file")"
   if grep -qE '(DBG|INF|WRN|ERR) |"level":' "$file"; then fail "$1: a log line is drawn on the screen"; fi
 }
@@ -376,7 +375,7 @@ scenario_tui_narrow_fail() {
   check_frame finished 80 24
   expect finished "▾"
   expect_not finished "─┼─▸"
-  expect finished "› deploy  ✗ failed: exit code 1"
+  expect finished " deploy  ✗ failed: exit code 1"
   expect finished "deploy: failing on request (WEFT_FIXTURE_FAIL)"
   expect finished "5 succeeded, 1 failed, 1 blocked"
   quit_and_check 1
@@ -458,7 +457,7 @@ scenario_tui_node_cancel() {
   wait_hanging "$run" 1 || return
   # guard, then the middle of the fan-out, then the node under it.
   tm send-keys -t smoke h h l j
-  wait_screen "› db-backup" 5 || return
+  wait_screen " db-backup  ● running" 5 || return
 
   tm send-keys -t smoke x
   wait_screen "canceling db-backup: it got SIGINT and has its kill_timeout (10s) to stop" 5 || return
@@ -495,7 +494,7 @@ scenario_tui_node_cancel() {
   if grep -q "lock released" "$run/db-backup.2.log"; then fail "the second x waited for the grace period"; fi
 
   tm send-keys -t smoke k k
-  wait_screen "› go-check" 5 || return
+  wait_screen " go-check  ● running" 5 || return
   tm send-keys -t smoke x
   wait_screen "⊘ go-check" 10 || return
   save_screen finished
@@ -617,9 +616,9 @@ scenario_tui_flood() {
   save_screen finished
   check_frame finished 160 45
   tm send-keys -t smoke h h h
-  wait_screen "› guard" 5 || return
+  wait_screen " guard  ✓ succeeded" 5 || return
   tm send-keys -t smoke Enter
-  wait_screen "esc/q back" 5 || return
+  wait_screen "esc back" 5 || return
   save_screen log
   expect log "guard: done"
   tm send-keys -t smoke Escape
@@ -733,7 +732,7 @@ scenario_tui_rerun() {
   start 160 45 "$(tui WEFT_FIXTURE_FAIL=deploy WEFT_LOG_LEVEL=debug --)"
   wait_screen "deploy  failed" 20 || return
   save_screen failed
-  expect failed "r rerun"
+  expect failed "r/R rerun"
   tm send-keys -t smoke r
   wait_screen "── attempt 2 ──" 5 || return
   wait_screen "deploy  failed" 10 || return

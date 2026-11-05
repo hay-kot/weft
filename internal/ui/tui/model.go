@@ -54,7 +54,10 @@ type Options struct {
 	// Notice is shown in the footer at the start, for example to say that
 	// the run resumes an earlier one.
 	Notice string
-	Log    zerolog.Logger
+	// CopyText puts text on the clipboard. Nil uses the platform's
+	// clipboard command, falling back to OSC 52.
+	CopyText func(text string) error
+	Log      zerolog.Logger
 }
 
 // Minimum terminal size for the full layout. Smaller terminals get a
@@ -65,8 +68,13 @@ const (
 )
 
 // mainChrome is the rows of the main view outside the graph, the log
-// body, and the footer: two header rows, three rules, and the log title.
-const mainChrome = 6
+// body, and the footer: the header and the rule under it, a blank row
+// under the graph, the log title between its two rules, and the rule over
+// the footer.
+const mainChrome = 7
+
+// wheelStep is how many lines one mouse wheel notch scrolls a log.
+const wheelStep = 3
 
 // tickInterval drives the spinner and the clocks while the run is active.
 const tickInterval = spinnerInterval
@@ -150,6 +158,7 @@ type Model struct {
 	pane   logPane
 	view   logView
 	footer footer
+	toast  toast
 
 	viewOpen bool
 	// auto makes the selection follow the run until the user moves it.
@@ -200,6 +209,7 @@ func New(opts Options) Model {
 		pane:           newLogPane(g.selected),
 		view:           newLogView(g.selected),
 		footer:         f,
+		toast:          toast{text: "", kind: noticeInfo, id: 0},
 		viewOpen:       false,
 		auto:           true,
 		cancelLevel:    0,
@@ -254,6 +264,12 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, m.lend(msg)
 	case lendDoneMsg:
 		return m, lendDone(msg, m.opts.Log)
+	case copyDoneMsg:
+		return m.copyDone(msg)
+	case toastExpiredMsg:
+		return m.toastExpired(msg), nil
+	case tea.MouseWheelMsg:
+		return m.handleWheel(msg), nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
@@ -411,6 +427,14 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, m.interrupt()
 	}
 
+	if key.Matches(k, m.keys.Copy) {
+		node := m.graph.selected
+		if m.viewOpen {
+			node = m.view.node
+		}
+		return m, m.copyDebugInfo(node)
+	}
+
 	if m.viewOpen {
 		switch {
 		case key.Matches(k, m.keys.Close):
@@ -466,6 +490,34 @@ func (m Model) handleKey(k tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 	m.pane, _ = m.pane.Update(k, m.keys, m.rs.logs[m.pane.node])
 	return m, nil
+}
+
+// handleWheel scrolls whichever log is on screen. The wheel never moves
+// the graph selection: scrolling output is what it is wanted for far more
+// often, and the graph has the selection keys.
+func (m Model) handleWheel(msg tea.MouseWheelMsg) Model {
+	if m.dialog != nil {
+		return m
+	}
+	dy, dx := 0, 0
+	switch msg.Button {
+	case tea.MouseWheelUp:
+		dy = -wheelStep
+	case tea.MouseWheelDown:
+		dy = wheelStep
+	case tea.MouseWheelLeft:
+		dx = -hScrollStep
+	case tea.MouseWheelRight:
+		dx = hScrollStep
+	default:
+		return m
+	}
+	if m.viewOpen {
+		m.view = m.view.wheel(dy, dx, m.rs.logs[m.view.node])
+		return m
+	}
+	m.pane = m.pane.wheel(dy, m.rs.logs[m.pane.node])
+	return m
 }
 
 // dialogKey handles a key while a dialog is open. It reports whether the
@@ -661,8 +713,8 @@ func (m Model) resized() Model {
 	footerH := m.footer.height()
 
 	if m.viewOpen {
-		// title, body, rule, footer
-		m.view = m.view.withSize(w, h-2-footerH)
+		// title, rule, body, rule, footer
+		m.view = m.view.withSize(w, h-3-footerH)
 		return m
 	}
 
@@ -681,6 +733,10 @@ func (m Model) resized() Model {
 func (m Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
+	// Mouse reporting is what turns the wheel into scroll events. Without
+	// it terminals send arrow keys in the alternate screen, which move the
+	// graph selection.
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
@@ -693,7 +749,7 @@ func (m Model) render() string {
 		return ansi.Truncate(fmt.Sprintf("window too small · weft %s %s", m.rs.wf.Name, ph), m.width, "…")
 	}
 
-	screen := m.screen()
+	screen := m.overlayToast(m.screen())
 	if m.dialog != nil {
 		return m.dialog.overlay(screen, m.width, m.height)
 	}
@@ -716,8 +772,9 @@ func (m Model) screen() string {
 	return join(
 		m.header.View(m.rs, ph, m.now, m.styles),
 		rule,
-		indent(graph),
-		rule,
+		// The trailing newline is the blank row that keeps the graph off the
+		// log title; join drops empty sections, so it can't be one of its own.
+		indent(graph)+"\n",
 		m.pane.View(m.rs, m.styles, m.now),
 		rule,
 		foot,

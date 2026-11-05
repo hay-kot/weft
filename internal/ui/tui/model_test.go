@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hay-kot/weft/internal/events"
-	"github.com/hay-kot/weft/internal/store"
 	"github.com/hay-kot/weft/internal/workflow"
 )
 
@@ -331,7 +330,7 @@ func TestFullScreenLog(t *testing.T) {
 	m = send(t, m, checksPassed(), press("enter"))
 	assert.True(t, m.viewOpen)
 	assert.Equal(t, nRelease, m.view.node)
-	assert.Equal(t, 24-2-1, m.view.height)
+	assert.Equal(t, 24-3-1, m.view.height)
 
 	m = send(t, m, press("k"))
 	assert.Equal(t, nRelease, m.graph.selected, "keys scroll the log, not the graph")
@@ -494,16 +493,73 @@ func TestGoldenFullScreenLog(t *testing.T) {
 	golden.RequireEqual(t, screen(m))
 }
 
-func TestHeaderKeepsCountsAndDirLabelWhenNarrow(t *testing.T) {
+func TestHeaderIsOneRowAndDropsTheRunIDWhenNarrow(t *testing.T) {
 	m, _ := newModel(t, 80, 24)
-	id := testRun().ID
-	m.rs.run = &store.Run{ID: id, Dir: "/Users/someone/src/github.com/example/project/.weft/runs/deploy/" + id, Workflow: workflowName}
 	m = send(t, m, checksPassed(), deployFailed())
 	rows := splitLines(ansi.Strip(m.View().Content))
 	assert.Contains(t, rows[0], "5 succeeded, 1 failed, 1 blocked")
 	assert.NotContains(t, rows[0], "run 2026", "the run ID gives way first")
-	assert.True(t, strings.HasPrefix(rows[1], " run dir …"), rows[1])
-	assert.True(t, strings.HasSuffix(rows[1], testRun().ID), rows[1])
+	assert.Contains(t, rows[1], "───", "the rule follows the header directly")
+	assert.NotContains(t, ansi.Strip(m.View().Content), "run dir")
+}
+
+func TestWheelScrollsTheLogNotTheGraph(t *testing.T) {
+	m, _ := newModel(t, 160, 45)
+	m = send(t, m, checksPassed())
+	for i := range 100 {
+		m.rs.logs[m.pane.node].append(logLine{Text: fmt.Sprintf("line %d", i), Notice: false})
+	}
+	selected := m.graph.selected
+	m = send(t, m, tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelUp, Mod: 0})
+	assert.Equal(t, selected, m.graph.selected)
+	assert.False(t, m.pane.scroll.follow, "scrolling up pauses the pane")
+	top := m.pane.scroll.top
+	m = send(t, m, tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelUp, Mod: 0})
+	assert.Equal(t, top-wheelStep, m.pane.scroll.top)
+
+	m = send(t, m, press("enter"), tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelUp, Mod: 0})
+	assert.False(t, m.view.scroll.follow, "the full-screen log scrolls too")
+	assert.Equal(t, selected, m.graph.selected)
+	assert.Equal(t, tea.MouseModeCellMotion, m.View().MouseMode)
+}
+
+func TestCopyDebugInfo(t *testing.T) {
+	var copied string
+	m := New(Options{
+		Workflow: deployWorkflow(t), Run: testRun(), ExitOnEnd: false, Interrupt: nil, Log: zerolog.Nop(),
+		CopyText: func(text string) error { copied = text; return nil },
+	})
+	m = send(t, m, tickMsg{at: t0}, tea.WindowSizeMsg{Width: 120, Height: 40}, checksPassed(), deployFailed())
+	m.rs.logs[nDeploy].append(logLine{Text: "\x1b[31mboom\x1b[0m", Notice: false})
+
+	_, cmd := update(t, m, press("y"))
+	msgs := runCmd(cmd)
+	require.Len(t, msgs, 1)
+	m = send(t, m, msgs...)
+
+	assert.Contains(t, copied, "run dir: "+testRun().Dir)
+	assert.Contains(t, copied, "## selected node: deploy")
+	assert.Contains(t, copied, "state: failed: exit code 1")
+	assert.Contains(t, copied, "\nboom\n", "output is copied without color codes")
+	assert.Equal(t, "copied debug info for deploy", m.toast.text)
+	assert.Empty(t, m.footer.notice, "a toast, not a footer notice, so the layout holds still")
+	assert.Contains(t, ansi.Strip(m.View().Content), "copied debug info for deploy")
+
+	m = send(t, m, toastExpiredMsg{id: m.toast.id})
+	assert.Empty(t, m.toast.text)
+	assert.NotContains(t, ansi.Strip(m.View().Content), "copied debug info")
+}
+
+func TestCopyDebugInfoFallsBackToOSC52(t *testing.T) {
+	m := New(Options{
+		Workflow: deployWorkflow(t), Run: testRun(), ExitOnEnd: false, Interrupt: nil, Log: zerolog.Nop(),
+		CopyText: func(string) error { return errNoClipboard },
+	})
+	m = send(t, m, tickMsg{at: t0}, tea.WindowSizeMsg{Width: 120, Height: 40}, checksPassed())
+	_, cmd := update(t, m, press("y"))
+	m, cmd = update(t, m, runCmd(cmd)[0])
+	assert.NotNil(t, cmd, "the terminal gets the text instead")
+	assert.Contains(t, m.toast.text, "OSC 52")
 }
 
 func TestGoldenHelpDialog(t *testing.T) {

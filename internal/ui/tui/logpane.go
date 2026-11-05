@@ -68,9 +68,19 @@ func (p logPane) Update(msg tea.Msg, keys KeyMap, buf *logBuffer) (logPane, bool
 	return p, true
 }
 
-// View draws the title row and exactly height output rows.
+// wheel scrolls the pane by delta lines.
+func (p logPane) wheel(delta int, buf *logBuffer) logPane {
+	if buf != nil {
+		p.scroll = p.scroll.scroll(delta, buf.first(), buf.end(), p.height)
+	}
+	return p
+}
+
+// View draws the title row between two rules, then exactly height output
+// rows.
 func (p logPane) View(rs *runState, s Styles, now time.Time) string {
-	lines := []string{logTitle(rs, p.node, now, s, p.width, p.scroll.follow, false)}
+	rule := s.Rule.Render(repeat("─", p.width))
+	lines := []string{rule, logTitle(rs, p.node, now, s, p.width, p.scroll.follow, false), rule}
 	lines = append(lines, logBody(rs, p.node, p.scroll, 0, p.width, p.height, s)...)
 	return strings.Join(lines, "\n")
 }
@@ -128,6 +138,20 @@ func (v logView) Update(msg tea.Msg, keys KeyMap, buf *logBuffer) (logView, bool
 	return v, true
 }
 
+// wheel scrolls the view by dy lines and dx columns.
+func (v logView) wheel(dy, dx int, buf *logBuffer) logView {
+	if buf == nil {
+		return v
+	}
+	if dy != 0 {
+		v.scroll = v.scroll.scroll(dy, buf.first(), buf.end(), v.height)
+	}
+	if dx != 0 {
+		v.left = min(max(0, v.left+dx), v.maxLeft(buf))
+	}
+	return v
+}
+
 // maxLeft is the furthest sideways scroll that still shows the end of the
 // widest line in view.
 func (v logView) maxLeft(buf *logBuffer) int {
@@ -139,16 +163,19 @@ func (v logView) maxLeft(buf *logBuffer) int {
 	return max(0, widest-v.width)
 }
 
-// View draws the title row and exactly height output rows.
+// View draws the title row, a rule, and exactly height output rows. The
+// screen edge stands in for the rule above the title.
 func (v logView) View(rs *runState, s Styles, now time.Time) string {
-	lines := []string{logTitle(rs, v.node, now, s, v.width, v.scroll.follow, true)}
+	lines := []string{logTitle(rs, v.node, now, s, v.width, v.scroll.follow, true), s.Rule.Render(repeat("─", v.width))}
 	lines = append(lines, logBody(rs, v.node, v.scroll, v.left, v.width, v.height, s)...)
 	return strings.Join(lines, "\n")
 }
 
-// logTitle renders "› label  icon status  duration  command", with the
-// follow state on the right. The full-screen view adds the attempt's log
-// path, which is where the complete output is.
+// logTitle renders "label  icon status  duration  command", with the
+// follow state on the right. Callers put it between rules, which mark it
+// as a heading rather than a line of output. The full-screen view shows
+// the attempt's log path in place of the command, since that file has the
+// complete output.
 func logTitle(rs *runState, id string, now time.Time, s Styles, width int, follow, full bool) string {
 	n := rs.wf.Node(id)
 	st := rs.nodes[id]
@@ -156,7 +183,7 @@ func logTitle(rs *runState, id string, now time.Time, s Styles, width int, follo
 		return ""
 	}
 	parts := []string{
-		s.Title.Render("› " + n.DisplayName()),
+		s.LogName.Render(n.DisplayName()),
 		s.State(st.State).Render(icon(st.State) + " " + statusText(st)),
 	}
 	if d, ok := nodeDuration(st, now); ok {
